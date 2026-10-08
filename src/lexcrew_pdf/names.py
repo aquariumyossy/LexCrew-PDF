@@ -65,6 +65,13 @@ def apply_number(template: str, number: int) -> str:
     return canonical_template(template).replace("N", fullwidth_digits(number))
 
 
+def branch_number(slot_index: int, slot_count: int) -> int | None:
+    """スロットが2つ以上のとき、1始まりの枝番。1つなら枝番なし。"""
+    if slot_count <= 1:
+        return None
+    return slot_index + 1
+
+
 def display_label(series: str, number: int, slot_index: int, slot_count: int) -> str:
     """カードに出す号証名。枝番スロットが複数のときだけ「の１」を付ける。"""
     base = apply_number(series, number)

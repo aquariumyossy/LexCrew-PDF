@@ -10,7 +10,7 @@ from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
 
-from .names import display_label, document_title, output_filename
+from .names import branch_number, display_label, document_title, output_filename
 from .layout import (
     Card,
     Layout,
@@ -488,7 +488,6 @@ class Session:
             return {"number": evidence_number, "pageCount": 0, "splittable": False, "thumb": "", "slots": empty_slots}
         _raw, _expanded, splittable, natural = inspect_source_pages(paths, split=split)
         buckets = resolve_buckets(list(natural), page_rows, counts)
-        branched = any(buckets.get(group) for group in range(2, len(counts) + 1))
         slots = []
         cursor = 0
         first_thumb = ""
@@ -498,10 +497,9 @@ class Session:
             output_refs = list(buckets.get(index + 1) or [])
             thumb = ""
             if output_refs:
-                branch = index + 1 if branched else None
                 jpeg = render_stamped_page_jpeg(
                     paths,
-                    stamp_label(template, evidence_number, branch),
+                    stamp_label(template, evidence_number, branch_number(index, len(counts))),
                     0,
                     zoom=0.48,
                     tilt=rotations[index],
@@ -654,11 +652,7 @@ class Session:
         slot = card.slots[slot_index]
         first = slot.files[0] if slot.files else None
         title = document_title(slot.title, first)
-        branched = len(card.slots) > 1 and (
-            any(item.files for item in card.slots[1:])
-            or any(row.group >= 2 for row in (card.pages or ()))
-        )
-        branch = None if slot_index == 0 and not branched else slot_index + 1
+        branch = branch_number(slot_index, len(card.slots))
         return output_filename(self.layout.label_template, card.number, branch, title)
 
     def _card(self, number: int) -> Card:

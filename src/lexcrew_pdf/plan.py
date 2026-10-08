@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .layout import Card, Layout, PageRow, Slot, resolve_stored_path
-from .names import document_title, output_filename, stamp_label
+from .names import branch_number, document_title, output_filename, stamp_label
 from .pages import GROUP_PRIMARY, resolve_buckets
 from .stamp import inspect_source_pages
 
@@ -54,16 +54,14 @@ def _jobs_for_card(series: str, card: Card, folder: Path) -> tuple[list[OutputJo
         return [], [_card_error(card, "ページがありません。")], _fallback_names(series, card, files_per_slot)
     rows = _page_rows(card.pages)
     buckets = resolve_buckets(list(natural), rows, files_per_slot)
-    branch_groups = [group for group in range(2, len(card.slots) + 1) if buckets.get(group)]
-    branched = bool(branch_groups)
     jobs: list[OutputJob] = []
     for group in range(GROUP_PRIMARY, len(card.slots) + 1):
         refs = list(buckets.get(group) or [])
         if not refs:
             continue
-        branch = group if branched else None
+        branch = branch_number(group - 1, len(card.slots))
         pages: tuple[tuple[int, int, int], ...] | None
-        if branch is None and refs == list(natural) and not buckets.get(0):
+        if refs == list(natural) and not buckets.get(0):
             pages = None
         else:
             pages = tuple(refs)
@@ -109,12 +107,16 @@ def _page_rows(pages: tuple[PageRow, ...] | None) -> list[dict]:
 
 
 def _fallback_names(series: str, card: Card, files_per_slot: list[int]) -> list[str]:
-    if not any(files_per_slot[1:]):
-        return [output_filename(series, card.number, None, _slot_document_title(card.slots[0]))]
+    slot_count = len(card.slots)
     names = []
     for slot_index, count in enumerate(files_per_slot):
         if count:
-            names.append(output_filename(series, card.number, slot_index + 1, _slot_document_title(card.slots[slot_index])))
+            names.append(output_filename(
+                series,
+                card.number,
+                branch_number(slot_index, slot_count),
+                _slot_document_title(card.slots[slot_index]),
+            ))
     return names
 
 

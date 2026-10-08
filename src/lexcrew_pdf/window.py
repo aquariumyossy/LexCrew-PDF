@@ -108,6 +108,15 @@ class Api:
             self._notify_editor(f"window.retarget({int(after['number'])}, {int(after['slot'])})")
         return view
 
+    def move_slot(self, number: int, slot_index: int, before_number=None) -> dict:
+        before = self.session.editor_identity()
+        target = None if before_number is None else int(before_number)
+        view = self._run(lambda: self.session.move_slot(int(number), int(slot_index), target))
+        after = self.session.editor_identity()
+        if after and before != after:
+            self._notify_editor(f"window.retarget({int(after['number'])}, {int(after['slot'])})")
+        return view
+
     def set_title(self, number: int, title: str, slot_index: int = 0) -> dict:
         return self._run(lambda: self.session.set_title(int(number), title, int(slot_index)))
 

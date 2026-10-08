@@ -221,6 +221,51 @@ class Session:
         return self.view()
 
     @_locked
+    def move_slot(self, number: int, slot_index: int, before_number: int | None = None) -> dict:
+        """証拠番号の境目へ動かす。枝番を動かすと、そのスロットは枝番なしの番号になる。"""
+        number = int(number)
+        slot_index = int(slot_index)
+        self._guard(number)
+        card = self._card(number)
+        _check_slot(card, slot_index)
+        if before_number is not None:
+            before_number = int(before_number)
+            self._card(before_number)
+        if len(card.slots) == 1 and before_number == number:
+            return self.view()
+
+        editing = self.open_editor
+        cards = list(self.layout.cards)
+        src = next(index for index, item in enumerate(cards) if item.number == number)
+        marks = [item.number for item in cards]
+        errors = {item.number: self.card_errors.get(item.number, "") for item in cards}
+        if len(card.slots) == 1:
+            moved = cards.pop(src)
+            moved_mark = marks.pop(src)
+            dest = _insert_at(cards, before_number)
+            if dest == src:
+                return self.view()
+            cards.insert(dest, moved)
+            marks.insert(dest, moved_mark)
+        else:
+            pulled, remainder = _extract_slot(card, slot_index)
+            cards[src] = remainder
+            dest = _insert_at(cards, before_number)
+            cards.insert(dest, pulled)
+            marks.insert(dest, None)
+        renumbered = tuple(_replace(item, number=index) for index, item in enumerate(cards, start=1))
+        self.card_errors = {
+            index: errors[mark]
+            for index, mark in enumerate(marks, start=1)
+            if mark is not None and errors.get(mark)
+        }
+        if editing is not None:
+            self.open_editor = OpenEditor(marks.index(editing.number) + 1, editing.slot_index)
+        self.layout = self._with_cards(renumbered)
+        self._persist()
+        return self.view()
+
+    @_locked
     def set_series(self, series: str) -> dict:
         self.layout = with_series(self.layout, series)
         self._persist()
@@ -681,6 +726,44 @@ def directory_message() -> str:
 
 def _empty(number: int) -> Card:
     return Card(number=number, split_a4=False, slots=(Slot(()),), pages=None)
+
+
+def _extract_slot(card: Card, slot_index: int) -> tuple[Card, Card]:
+    start = sum(len(slot.files) for slot in card.slots[:slot_index])
+    removed = len(card.slots[slot_index].files)
+    pulled = Card(
+        number=card.number,
+        split_a4=card.split_a4,
+        slots=(card.slots[slot_index],),
+        pages=_pages_for_extracted_slot(card.pages, start, removed),
+    )
+    return pulled, _without_slot(card, slot_index)
+
+
+def _pages_for_extracted_slot(pages, start: int, removed: int):
+    if not pages:
+        return None
+    adjusted = []
+    for row in pages:
+        if not start <= row.source < start + removed:
+            continue
+        adjusted.append(PageRow(
+            source=row.source - start,
+            page=row.page,
+            part=row.part,
+            group=0 if row.group == 0 else 1,
+            position=len(adjusted),
+        ))
+    return tuple(adjusted) or None
+
+
+def _insert_at(cards: list[Card], before_number: int | None) -> int:
+    if before_number is None:
+        return len(cards)
+    for index, card in enumerate(cards):
+        if card.number == before_number:
+            return index
+    raise ValueError("証拠の番号が不正です。")
 
 
 def _without_slot(card: Card, slot_index: int) -> Card:

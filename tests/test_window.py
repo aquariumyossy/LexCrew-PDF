@@ -497,6 +497,166 @@ def test_zoom_stays_inside_the_render_range():
     assert _clamp_zoom(1.15) == 1.15
 
 
+def test_move_plain_card_renumbers_title_and_filename(tmp_path):
+    session = Session(tmp_path)
+    session.set_title(1, "いち")
+    session.set_title(2, "に")
+    session.set_title(3, "さん")
+    session.card_errors[3] = "開けません。"
+    view = session.move_slot(3, 0, 1)
+    assert [card["slots"][0]["title"] for card in view["cards"][:3]] == ["さん", "いち", "に"]
+    assert view["cards"][0]["slots"][0]["filename"] == "甲001：さん.pdf"
+    assert view["cards"][0]["label"] == "甲第１号証"
+    assert view["cards"][1]["slots"][0]["filename"] == "甲002：いち.pdf"
+    assert view["cards"][2]["label"] == "甲第３号証"
+    assert view["cards"][0]["message"] == "開けません。"
+    assert view["cards"][2]["message"] == ""
+    assert [card["number"] for card in view["cards"]] == [1, 2, 3, 4, 5, 6]
+
+
+def test_move_plain_card_does_not_join_a_branch(tmp_path):
+    session = Session(tmp_path)
+    session.add_branch(2)
+    session.set_title(2, "本体", 0)
+    session.set_title(2, "枝", 1)
+    session.set_title(3, "さん")
+    view = session.move_slot(3, 0, 2)
+    assert len(view["cards"][1]["slots"]) == 1
+    assert view["cards"][1]["slots"][0]["title"] == "さん"
+    assert [slot["title"] for slot in view["cards"][2]["slots"]] == ["本体", "枝"]
+
+
+def test_move_branch_to_the_front_drops_the_branch_mark(tmp_path):
+    from lexcrew_pdf.plan import jobs_from_layout
+
+    body = tmp_path / "body.pdf"
+    branch = tmp_path / "branch.pdf"
+    _pdf(body, ("BODY",))
+    _pdf(branch, ("BRANCH",))
+    session = Session(tmp_path)
+    session.set_title(1, "いち")
+    session.add_file(2, 0, str(body))
+    session.add_branch(2)
+    session.add_file(2, 1, str(branch))
+    session.rotate(2, 1)
+    session.set_title(3, "さん")
+    session.card_errors[2] = "開けません。"
+    view = session.move_slot(2, 1, 1)
+    moved = view["cards"][0]
+    assert moved["label"] == "甲第１号証"
+    assert len(moved["slots"]) == 1
+    assert moved["slots"][0]["filename"] == "甲001：branch.pdf"
+    assert moved["slots"][0]["rotation"] == 90
+    assert moved["message"] == ""
+    assert view["cards"][1]["slots"][0]["title"] == "いち"
+    left = view["cards"][2]
+    assert left["label"] == "甲第３号証"
+    assert left["slots"][0]["filename"] == "甲003：body.pdf"
+    assert left["message"] == "開けません。"
+    assert view["cards"][3]["slots"][0]["title"] == "さん"
+    built = jobs_from_layout(session.layout, tmp_path)
+    assert [(job.stamp, job.filename) for job in built.jobs] == [
+        ("甲第１号証", "甲001：branch.pdf"),
+        ("甲第３号証", "甲003：body.pdf"),
+    ]
+
+
+def test_move_middle_branch_keeps_the_other_two(tmp_path):
+    files = []
+    for name in ("a.pdf", "b.pdf", "c.pdf"):
+        path = tmp_path / name
+        _pdf(path, (name,))
+        files.append(path)
+    session = Session(tmp_path)
+    session.add_branch(2)
+    session.add_branch(2)
+    for index, path in enumerate(files):
+        session.add_file(2, index, str(path))
+    view = session.move_slot(2, 1, 1)
+    assert view["cards"][0]["label"] == "甲第１号証"
+    assert view["cards"][0]["slots"][0]["files"][0]["name"] == "b.pdf"
+    assert view["cards"][0]["slots"][0]["filename"] == "甲001：b.pdf"
+    kept = view["cards"][2]
+    assert [slot["files"][0]["name"] for slot in kept["slots"]] == ["a.pdf", "c.pdf"]
+    assert [slot["label"] for slot in kept["slots"]] == ["甲第３号証の１", "甲第３号証の２"]
+    assert kept["slots"][0]["filename"] == "甲003-1：a.pdf"
+    assert kept["slots"][1]["filename"] == "甲003-2：c.pdf"
+
+
+def test_move_branch_carries_pages_and_split_without_opening_pdfs(tmp_path, monkeypatch):
+    files = []
+    for name in ("a.pdf", "b.pdf", "c.pdf"):
+        path = tmp_path / name
+        _pdf(path, (name,))
+        files.append(path)
+    session = Session(tmp_path)
+    session.add_branch(1)
+    session.add_branch(1)
+    for index, path in enumerate(files):
+        session.add_file(1, index, str(path))
+    session._put(_replace(
+        session.layout.cards[0],
+        split_a4=True,
+        pages=(
+            PageRow(source=0, page=0, part=0, group=0, position=0),
+            PageRow(source=0, page=0, part=1, group=1, position=1),
+            PageRow(source=1, page=0, part=0, group=2, position=2),
+            PageRow(source=2, page=0, part=0, group=3, position=3),
+        ),
+    ))
+
+    def refuse_open(*_args, **_kwargs):
+        raise AssertionError("pdf")
+
+    monkeypatch.setattr(fitz, "open", refuse_open)
+    session.move_slot(1, 0, 2)
+    assert session.layout.cards[0].split_a4 is True
+    assert [slot.files[0] for slot in session.layout.cards[0].slots] == ["b.pdf", "c.pdf"]
+    assert session.layout.cards[0].pages == (
+        PageRow(source=0, page=0, part=0, group=1, position=0),
+        PageRow(source=1, page=0, part=0, group=2, position=1),
+    )
+    assert session.layout.cards[1].split_a4 is True
+    assert session.layout.cards[1].slots[0].files == ("a.pdf",)
+    assert session.layout.cards[1].pages == (
+        PageRow(source=0, page=0, part=0, group=0, position=0),
+        PageRow(source=0, page=0, part=1, group=1, position=1),
+    )
+
+
+def test_move_to_the_same_place_keeps_the_layout(tmp_path):
+    session = Session(tmp_path)
+    session.set_title(2, "に")
+    session.add_branch(4)
+    session.set_title(4, "枝", 1)
+    before = session.layout.cards
+    assert session.move_slot(2, 0, 3)["cards"][1]["slots"][0]["title"] == "に"
+    assert session.move_slot(2, 0, 2)["cards"][1]["number"] == 2
+    assert session.move_slot(6, 0, None)["cards"][5]["number"] == 6
+    assert session.layout.cards == before
+
+
+def test_move_locked_number_is_rejected_and_another_move_follows_the_editor(tmp_path):
+    source = tmp_path / "c.pdf"
+    other = tmp_path / "a.pdf"
+    _pdf(source, ("C", "D"))
+    _pdf(other, ("A",))
+    session = Session(tmp_path)
+    session.add_file(1, 0, str(other))
+    session.add_file(3, 0, str(source))
+    session.add_branch(3)
+    session.add_file(3, 1, str(source))
+    session.begin_edit(3, 1)
+    with pytest.raises(ValueError, match="編集中"):
+        session.move_slot(3, 0, 1)
+    session.move_slot(1, 0, None)
+    assert session.editor_identity() == {"number": 2, "slot": 1}
+    with pytest.raises(ValueError, match="編集中"):
+        session.rotate(2)
+    session.rotate(1)
+    assert session.layout.cards[0].slots[0].rotation == 90
+
+
 def test_downloads_dir_is_this_pc_download_folder():
     path = downloads_dir()
     assert path.is_absolute()

@@ -1,0 +1,6 @@
+.venv/
+.pytest_cache/
+__pycache__/
+*.egg-info/
+_boot.txt
+_boot_err.txt

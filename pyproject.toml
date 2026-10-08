@@ -1,0 +1,22 @@
+[project]
+name = "lexcrew-pdf"
+version = "0.1.0"
+description = "証拠番号付き PDF をカードから書く"
+requires-python = ">=3.11"
+dependencies = [
+    "pymupdf",
+    "pywebview",
+]
+
+[project.scripts]
+lexcrew-pdf = "lexcrew_pdf.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

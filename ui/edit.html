@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <title>ページ編集</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      display: flex;
+      flex-direction: column;
+      font-family: "Segoe UI", "Yu Gothic UI", "Meiryo", sans-serif;
+      color: #1a2438;
+      background: #e7edf6;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 8px 12px;
+      background: #fff;
+      border-bottom: 1px solid #d5deef;
+    }
+    h1 { margin: 0; font-size: 15px; }
+    .tools, .zoom { display: flex; align-items: center; gap: 6px; }
+    #zoom-label { min-width: 4.5em; }
+    button, input { font: inherit; }
+    .btn {
+      border: 1px solid #c5d2ea;
+      background: #fff;
+      border-radius: 8px;
+      padding: 6px 10px;
+      cursor: pointer;
+    }
+    #banner {
+      margin: 0;
+      padding: 6px 12px;
+      background: #fde8e8;
+      color: #9d2c1e;
+    }
+    main { flex: 1; display: flex; min-height: 0; }
+    #nav {
+      width: 168px;
+      overflow: auto;
+      background: #f4f7fb;
+      border-right: 1px solid #d5deef;
+      padding: 8px;
+    }
+    .thumb {
+      position: relative;
+      margin: 0 0 8px;
+      border: 2px solid transparent;
+      border-radius: 6px;
+      background: #fff;
+      cursor: grab;
+    }
+    .thumb.is-active { border-color: #2f6fd6; }
+    .thumb img {
+      display: block;
+      width: 100%;
+      aspect-ratio: 210 / 297;
+      object-fit: contain;
+      background: #fff;
+      pointer-events: none;
+    }
+    .thumb .mark {
+      position: absolute;
+      left: 4px;
+      bottom: 4px;
+      padding: 0 4px;
+      border-radius: 3px;
+      background: rgba(16, 24, 40, 0.72);
+      color: #fff;
+      font-size: 11px;
+    }
+    .thumb .remove {
+      position: absolute;
+      top: 2px;
+      right: 2px;
+      width: 22px;
+      height: 22px;
+      border: 0;
+      border-radius: 11px;
+      background: rgba(16, 24, 40, 0.72);
+      color: #fff;
+      cursor: pointer;
+      line-height: 22px;
+      padding: 0;
+    }
+    .thumb .remove:disabled { opacity: 0.35; cursor: default; }
+    #pages {
+      position: relative;
+      flex: 1;
+      overflow: auto;
+      background: #5c6570;
+    }
+    .sheet {
+      width: calc(100% - 32px);
+      margin: 16px auto;
+      background: #fff;
+      box-shadow: 0 2px 12px rgba(0, 0, 0, 0.28);
+    }
+    .sheet img {
+      display: block;
+      width: 100%;
+      aspect-ratio: 210 / 297;
+      object-fit: contain;
+      background: #fff;
+    }
+  </style>
+</head>
+<body>
+  <p id="banner" hidden></p>
+  <header>
+    <h1 id="heading">ページ編集</h1>
+    <div class="tools">
+      <div class="zoom">
+        <button id="zoom-out" class="btn" type="button" aria-label="縮小">−</button>
+        <button id="zoom-label" class="btn" type="button" aria-label="幅に合わせる">100%</button>
+        <button id="zoom-in" class="btn" type="button" aria-label="拡大">＋</button>
+      </div>
+      <button id="reset" class="btn" type="button">元に戻す</button>
+    </div>
+  </header>
+  <main>
+    <nav id="nav" aria-label="ページ"></nav>
+    <div id="pages"></div>
+  </main>
+  <script src="edit.js"></script>
+</body>
+</html>

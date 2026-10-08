@@ -90,7 +90,13 @@ def test_empty_branch_stays_one_file(tmp_path):
     session.add_branch(3)
     built = jobs_from_layout(session.layout, tmp_path)
     assert len(built.jobs) == 1
-    assert "の" not in built.jobs[0].filename
+    assert built.jobs[0].filename == "甲003-1：lease.pdf"
+    assert built.jobs[0].stamp == "甲第３号証の１"
+    assert session.view()["cards"][2]["slots"][0]["filename"] == "甲003-1：lease.pdf"
+    view = session.delete_slot(3, 1)
+    card = next(item for item in view["cards"] if item["number"] == 3)
+    assert len(card["slots"]) == 1
+    assert card["slots"][0]["filename"] == "甲003：lease.pdf"
 
 
 def test_filled_branch_becomes_two_files(tmp_path):

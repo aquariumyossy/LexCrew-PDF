@@ -210,6 +210,20 @@ class Api:
         self._notify_editor("window.reloadAppearance()")
         return view
 
+    def set_stamp_style(self, color, size, font) -> dict:
+        from .stamp import StampFontMissing
+
+        def save():
+            try:
+                return self.session.set_stamp_style(color, size, font)
+            except StampFontMissing as exc:
+                return {**self.session.view(), "ok": False, "message": str(exc)}
+
+        view = self._run(save)
+        if view.get("ok") is not False:
+            self._notify_editor("window.reloadAppearance()")
+        return view
+
     def add_series_choice(self) -> dict:
         return self._run(self.session.add_series_choice)
 

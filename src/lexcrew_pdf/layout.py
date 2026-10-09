@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .names import INITIAL_SERIES, SERIES, canonical_template, check_series, filename_prefix
+from .stamp import DEFAULT_STAMP, StampStyle, stamp_record, stamp_style_from_json
 
 LAYOUT_NAME = "layout.json"
 OUTPUT_DIR_NAME = "LexCrew-PDF-Downloads"
@@ -80,6 +81,7 @@ class Layout:
     last_written: tuple[str, ...]
     label_template: str
     grayscale: bool = False
+    stamp: StampStyle = DEFAULT_STAMP
 
 
 def default_layout() -> Layout:
@@ -90,6 +92,7 @@ def default_layout() -> Layout:
         last_written=(),
         label_template="甲第N号証",
         grayscale=False,
+        stamp=DEFAULT_STAMP,
     )
 
 
@@ -203,7 +206,8 @@ def parse_layout(raw: dict) -> Layout:
     cards_raw = raw.get("cards")
     if not isinstance(cards_raw, list):
         raise ValueError("配置ファイルを読めません。")
-    cards = tuple(_parse_card(item) for item in cards_raw)
+    stamp = stamp_style_from_json(raw.get("stamp"))
+    cards = tuple(_parse_card(item, stamp) for item in cards_raw)
     numbers = [card.number for card in cards]
     if len(numbers) != len(set(numbers)):
         raise ValueError("配置ファイルを読めません。")
@@ -220,6 +224,7 @@ def parse_layout(raw: dict) -> Layout:
         last_written=last_written,
         label_template=label_template,
         grayscale=raw.get("grayscale") is True,
+        stamp=stamp,
     )
 
 
@@ -283,6 +288,9 @@ def layout_to_json(layout: Layout) -> dict:
     }
     if layout.grayscale:
         payload["grayscale"] = True
+    record = stamp_record(layout.stamp)
+    if record is not None:
+        payload["stamp"] = record
     return payload
 
 
@@ -320,6 +328,7 @@ def with_series(layout: Layout, series: str) -> Layout:
         last_written=layout.last_written,
         label_template=template,
         grayscale=layout.grayscale,
+        stamp=layout.stamp,
     )
 
 
@@ -336,6 +345,7 @@ def with_next_series(layout: Layout) -> Layout:
                 last_written=layout.last_written,
                 label_template=layout.label_template,
                 grayscale=layout.grayscale,
+                stamp=layout.stamp,
             )
     return layout
 
@@ -344,7 +354,7 @@ def _empty_card(number: int) -> Card:
     return Card(number=number, split_a4=False, slots=(Slot(()),), pages=None)
 
 
-def _parse_card(raw: dict) -> Card:
+def _parse_card(raw: dict, stamp: StampStyle) -> Card:
     if not isinstance(raw, dict):
         raise ValueError("配置ファイルを読めません。")
     try:
@@ -361,7 +371,7 @@ def _parse_card(raw: dict) -> Card:
     slots_raw = raw.get("slots")
     if not isinstance(slots_raw, list) or not slots_raw:
         raise ValueError("配置ファイルを読めません。")
-    slots = tuple(_parse_slot(item, legacy_title, legacy_rotation) for item in slots_raw)
+    slots = tuple(_parse_slot(item, legacy_title, legacy_rotation, stamp) for item in slots_raw)
     pages_raw = raw.get("pages", None)
     pages = None if pages_raw is None else tuple(_parse_page(item, index) for index, item in enumerate(pages_raw))
     masks_raw = raw.get("masks", [])
@@ -402,7 +412,7 @@ def _slot_json(slot: Slot) -> dict:
     return item
 
 
-def _parse_slot(raw: dict, legacy_title: str, legacy_rotation: int) -> Slot:
+def _parse_slot(raw: dict, legacy_title: str, legacy_rotation: int, stamp: StampStyle) -> Slot:
     if not isinstance(raw, dict):
         raise ValueError("配置ファイルを読めません。")
     files = raw.get("files") or []
@@ -422,7 +432,7 @@ def _parse_slot(raw: dict, legacy_title: str, legacy_rotation: int) -> Slot:
         rotation = legacy_rotation
     stamp_dx = _parse_point(raw, "stampDx")
     stamp_dy = _parse_point(raw, "stampDy")
-    stamp_dx, stamp_dy = _stored_offset(stamp_dx, stamp_dy)
+    stamp_dx, stamp_dy = _stored_offset(stamp_dx, stamp_dy, stamp)
     return Slot(stored, title, rotation, stamp_dx, stamp_dy)
 
 
@@ -435,12 +445,12 @@ def _parse_point(raw: dict, key: str) -> int:
     return value
 
 
-def _stored_offset(dx: int, dy: int) -> tuple[int, int]:
+def _stored_offset(dx: int, dy: int, stamp: StampStyle) -> tuple[int, int]:
     if dx == 0 and dy == 0:
         return 0, 0
     from .stamp import stamp_frame
 
-    frame = stamp_frame(dx, dy)
+    frame = stamp_frame(dx, dy, stamp)
     if frame is None:
         return dx, dy
     return int(frame["dx"]), int(frame["dy"])

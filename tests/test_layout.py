@@ -19,7 +19,7 @@ from lexcrew_pdf.layout import (
 )
 from lexcrew_pdf.plan import jobs_from_layout
 from lexcrew_pdf.session import Session
-from lexcrew_pdf.stamp import stamp_frame, stamp_sources_to_pdf, yu_mincho_path
+from lexcrew_pdf.stamp import DEFAULT_STAMP, color_hex, stamp_frame, stamp_sources_to_pdf, yu_mincho_path
 from lexcrew_pdf.write import write_jobs
 
 
@@ -368,7 +368,7 @@ def test_grayscale_is_omitted_when_off_and_kept_across_series(tmp_path, monkeypa
     assert session.layout.grayscale is True
     seen = {}
 
-    def fake_write(folder, jobs, *, last_written, preserve=(), grayscale=False):
+    def fake_write(folder, jobs, *, last_written, preserve=(), grayscale=False, style=None):
         seen["grayscale"] = grayscale
         name = jobs[0].filename
         return {"written": [{"filename": name, "stampLabel": jobs[0].stamp}], "errors": [], "keep": (name,)}
@@ -380,6 +380,72 @@ def test_grayscale_is_omitted_when_off_and_kept_across_series(tmp_path, monkeypa
     session.set_grayscale(False)
     raw = json.loads((tmp_path / "LexCrew-PDF-Downloads" / "layout.json").read_text(encoding="utf-8"))
     assert "grayscale" not in raw
+
+
+def test_stamp_style_is_omitted_when_default_and_survives_series_changes(tmp_path, monkeypatch):
+    assert "stamp" not in layout_to_json(default_layout())
+    missing = {
+        "series": "甲",
+        "enabledSeries": ["甲", "乙", "丙"],
+        "cards": [{"number": 1, "slots": [{"files": [], "title": ""}]}],
+        "lastWritten": [],
+    }
+    assert parse_layout(missing).stamp == DEFAULT_STAMP
+    uppercase = parse_layout({**missing, "stamp": {"color": "#FF0000"}})
+    assert uppercase.stamp == DEFAULT_STAMP
+    assert "stamp" not in layout_to_json(uppercase)
+    green = parse_layout({**missing, "stamp": {"color": "#008000"}})
+    assert layout_to_json(green)["stamp"]["color"] == "#008000"
+    black = parse_layout({**missing, "stamp": {"color": "#000000"}})
+    assert color_hex(black.stamp.color) == "#000000"
+    partial = parse_layout({**missing, "stamp": {"size": 16.0}})
+    assert (partial.stamp.size, partial.stamp.font) == (16, "mincho")
+    assert layout_to_json(partial)["stamp"] == {"color": "#ff0000", "size": 16, "font": "mincho"}
+    blue = parse_layout({**missing, "stamp": {"color": "#0000ff", "size": 18, "font": "gothic"}})
+    assert with_series(blue, "乙").stamp == blue.stamp
+    assert with_next_series(blue).stamp.font == "gothic"
+    for broken in (
+        {"stamp": "red"},
+        {"stamp": {"color": "red"}},
+        {"stamp": {"color": "#112233"}},
+        {"stamp": {"size": True}},
+        {"stamp": {"size": 7}},
+        {"stamp": {"font": "comic"}},
+    ):
+        with pytest.raises(ValueError, match="配置ファイルを読めません。"):
+            parse_layout({**missing, **broken})
+    if not os.path.isfile(yu_mincho_path()):
+        pytest.skip("游明朝がありません")
+    source = tmp_path / "a.pdf"
+    _pdf(source)
+    session = Session(tmp_path)
+    session.add_file(1, 0, str(source))
+    session.set_stamp_offset(1, 0, -40, 55)
+    view = session.set_stamp_style("#0000ff", 18, "mincho")
+    assert view["stamp"] == {"color": "#0000ff", "size": 18, "font": "mincho"}
+    assert session.layout.cards[0].slots[0].stamp_dx == -40
+    assert load_layout(tmp_path).stamp.size == 18
+    session.set_series("乙")
+    session.set_grayscale(True)
+    assert session.layout.stamp.size == 18
+    assert session.layout.grayscale is True
+    seen = {}
+
+    def fake_write(folder, jobs, *, last_written, preserve=(), grayscale=False, style=None):
+        seen["style"] = style
+        name = jobs[0].filename
+        return {"written": [{"filename": name, "stampLabel": jobs[0].stamp}], "errors": [], "keep": (name,)}
+
+    monkeypatch.setattr("lexcrew_pdf.write.write_jobs", fake_write)
+    session.generate()
+    assert seen["style"].size == 18
+    assert session.layout.stamp.font == "mincho"
+    session.set_stamp_style("#ff0000", 11, "mincho")
+    raw = json.loads((tmp_path / "LexCrew-PDF-Downloads" / "layout.json").read_text(encoding="utf-8"))
+    assert "stamp" not in raw
+    session.set_stamp_style("#0000ff", 16.0, "mincho")
+    session.clear()
+    assert session.layout.stamp == DEFAULT_STAMP
 
 
 def test_zero_rotation_is_omitted_after_a_full_turn(tmp_path):

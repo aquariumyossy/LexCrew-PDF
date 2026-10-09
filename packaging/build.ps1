@@ -8,7 +8,7 @@ $embedName = "python-3.13.14-embed-amd64.zip"
 $embedUrl = "https://www.python.org/ftp/python/3.13.14/$embedName"
 $embedHash = "90B4E5B9898B72D744650524BFF92377C367F44BD5FBD09E3148656C080AD907"
 $dest = Join-Path $repo "dist\LexCrew-PDF"
-$zipPath = Join-Path $repo "dist\LexCrew-PDF-1.1.0-win64.zip"
+$zipPath = Join-Path $repo "dist\LexCrew-PDF-1.1.1-win64.zip"
 
 function Get-Sha256 {
     param([string]$Path)
@@ -16,8 +16,8 @@ function Get-Sha256 {
 }
 
 $pyproject = Get-Content -LiteralPath (Join-Path $repo "pyproject.toml") -Raw -Encoding UTF8
-if ($pyproject -notmatch 'version = "1.1.0"') {
-    throw "版が 1.1.0 ではありません。"
+if ($pyproject -notmatch 'version = "1.1.1"') {
+    throw "版が 1.1.1 ではありません。"
 }
 
 New-Item -ItemType Directory -Force -Path $cache | Out-Null

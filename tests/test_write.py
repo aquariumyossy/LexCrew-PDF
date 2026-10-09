@@ -179,6 +179,75 @@ def test_grayscale_write_leaves_the_source_and_keeps_a_red_stamp(tmp_path):
         written.close()
 
 
+def _pages(path, texts):
+    document = fitz.open()
+    for text in texts:
+        page = document.new_page(width=595, height=842)
+        page.insert_text((72, 72), text)
+    document.save(path)
+    document.close()
+
+
+def _red_rect(page):
+    found = []
+    for drawing in page.get_drawings():
+        color = drawing.get("color")
+        if color and len(color) >= 3 and color[0] > 0.8 and color[1] < 0.2 and color[2] < 0.2:
+            found.append(drawing["rect"])
+    return found
+
+
+def test_merged_branch_file_stamps_each_branch_and_leaves_other_files(tmp_path):
+    _require_font()
+    from lexcrew_pdf.session import Session
+
+    first = tmp_path / "契約.pdf"
+    second = tmp_path / "領収.pdf"
+    _pages(first, ("ONEA", "ONEB"))
+    _pdf(second, "TWO")
+    before_first = first.read_bytes()
+    before_second = second.read_bytes()
+    dest = tmp_path / "LexCrew-PDF-Downloads"
+    dest.mkdir()
+    note = dest / "メモ.pdf"
+    note.write_bytes(b"keep")
+    session = Session(tmp_path)
+    session.add_file(1, 0, str(first))
+    session.add_branch(1)
+    session.add_file(1, 1, str(second))
+    session.set_title(1, "契約", 0)
+    session.set_title(1, "領収", 1)
+    session.rotate(1, 1)
+    session.set_stamp_offset(1, 1, -40, 0)
+    session.set_merge_branches(True)
+    result = session.generate()
+    assert result["ok"] is True
+    names = {path.name for path in dest.glob("*.pdf")}
+    assert names == {"甲001-1~2 契約.pdf", "メモ.pdf"}
+    assert not list(dest.glob("*.writing"))
+    assert note.read_bytes() == b"keep"
+    assert first.read_bytes() == before_first
+    assert second.read_bytes() == before_second
+    document = fitz.open(dest / "甲001-1~2 契約.pdf")
+    try:
+        assert document.page_count == 3
+        assert "甲第１号証の１" in document[0].get_text("text")
+        assert "の２" not in document[0].get_text("text")
+        assert "ONEA" in document[0].get_text("text")
+        assert "号証" not in document[1].get_text("text")
+        assert "ONEB" in document[1].get_text("text")
+        assert "甲第１号証の２" in document[2].get_text("text")
+        assert "TWO" in document[2].get_text("text")
+        first_box = _red_rect(document[0])
+        second_box = _red_rect(document[2])
+        assert len(first_box) == 1
+        assert len(second_box) == 1
+        assert _red_rect(document[1]) == []
+        assert abs((first_box[0].x0 - second_box[0].x0) - 40) < 1.5
+    finally:
+        document.close()
+
+
 def test_output_is_only_under_shoko(tmp_path):
     _require_font()
     job = _job(tmp_path, "a.pdf", "甲第１号証", "甲001：契約.pdf")

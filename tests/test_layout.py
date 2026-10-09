@@ -103,13 +103,13 @@ def test_empty_branch_stays_one_file(tmp_path):
     session.add_branch(3)
     built = jobs_from_layout(session.layout, tmp_path)
     assert len(built.jobs) == 1
-    assert built.jobs[0].filename == "甲003-1：lease.pdf"
+    assert built.jobs[0].filename == "甲003-1 lease.pdf"
     assert built.jobs[0].stamp == "甲第３号証の１"
-    assert session.view()["cards"][2]["slots"][0]["filename"] == "甲003-1：lease.pdf"
+    assert session.view()["cards"][2]["slots"][0]["filename"] == "甲003-1 lease.pdf"
     view = session.delete_slot(3, 1)
     card = next(item for item in view["cards"] if item["number"] == 3)
     assert len(card["slots"]) == 1
-    assert card["slots"][0]["filename"] == "甲003：lease.pdf"
+    assert card["slots"][0]["filename"] == "甲003 lease.pdf"
 
 
 def test_filled_branch_becomes_two_files(tmp_path):
@@ -123,8 +123,8 @@ def test_filled_branch_becomes_two_files(tmp_path):
     session.add_file(4, 1, str(branch))
     built = jobs_from_layout(session.layout, tmp_path)
     assert len(built.jobs) == 2
-    assert built.jobs[0].filename.startswith("甲004-1：")
-    assert built.jobs[1].filename.startswith("甲004-2：")
+    assert built.jobs[0].filename.startswith("甲004-1 ")
+    assert built.jobs[1].filename.startswith("甲004-2 ")
     assert built.jobs[0].stamp == "甲第４号証の１"
     assert built.jobs[1].stamp == "甲第４号証の２"
 
@@ -134,12 +134,12 @@ def test_card_field_shows_the_output_filename(tmp_path):
     _pdf(source)
     session = Session(tmp_path)
     session.add_file(4, 0, str(source))
-    assert session.view()["cards"][3]["slots"][0]["filename"] == "甲004：賃貸借契約書.pdf"
+    assert session.view()["cards"][3]["slots"][0]["filename"] == "甲004 賃貸借契約書.pdf"
     session.add_branch(4)
     session.add_file(4, 1, str(source))
     slots = session.view()["cards"][3]["slots"]
-    assert slots[0]["filename"] == "甲004-1：賃貸借契約書.pdf"
-    assert slots[1]["filename"] == "甲004-2：賃貸借契約書.pdf"
+    assert slots[0]["filename"] == "甲004-1 賃貸借契約書.pdf"
+    assert slots[1]["filename"] == "甲004-2 賃貸借契約書.pdf"
 
 
 def test_blank_title_uses_the_file_stem(tmp_path):
@@ -148,7 +148,7 @@ def test_blank_title_uses_the_file_stem(tmp_path):
     session = Session(tmp_path)
     session.add_file(1, 0, str(source))
     built = jobs_from_layout(session.layout, tmp_path)
-    assert built.jobs[0].filename == "甲001：住宅賃貸借契約書.pdf"
+    assert built.jobs[0].filename == "甲001 住宅賃貸借契約書.pdf"
 
 
 def test_empty_card_is_skipped(tmp_path):
@@ -181,20 +181,20 @@ def test_branch_filename_uses_that_slots_file(tmp_path):
     session.add_branch(1)
     session.add_file(1, 1, str(second))
     slots = session.view()["cards"][0]["slots"]
-    assert slots[0]["filename"] == "乙001-1：5.建物評価証明書.pdf"
-    assert slots[1]["filename"] == "乙001-2：3.賃貸人会社謄本.pdf"
+    assert slots[0]["filename"] == "乙001-1 5.建物評価証明書.pdf"
+    assert slots[1]["filename"] == "乙001-2 3.賃貸人会社謄本.pdf"
     built = jobs_from_layout(session.layout, tmp_path)
     assert [job.filename for job in built.jobs] == [
-        "乙001-1：5.建物評価証明書.pdf",
-        "乙001-2：3.賃貸人会社謄本.pdf",
+        "乙001-1 5.建物評価証明書.pdf",
+        "乙001-2 3.賃貸人会社謄本.pdf",
     ]
     session.set_title(1, "手入力", 1)
     slots = session.view()["cards"][0]["slots"]
-    assert slots[0]["filename"] == "乙001-1：5.建物評価証明書.pdf"
-    assert slots[1]["filename"] == "乙001-2：手入力.pdf"
+    assert slots[0]["filename"] == "乙001-1 5.建物評価証明書.pdf"
+    assert slots[1]["filename"] == "乙001-2 手入力.pdf"
     session.set_title(1, "", 1)
     assert session.layout.cards[0].slots[1].title == ""
-    assert session.view()["cards"][0]["slots"][1]["filename"] == "乙001-2：3.賃貸人会社謄本.pdf"
+    assert session.view()["cards"][0]["slots"][1]["filename"] == "乙001-2 3.賃貸人会社謄本.pdf"
 
 
 def test_a_later_file_on_the_same_slot_keeps_the_first_name(tmp_path):
@@ -206,7 +206,7 @@ def test_a_later_file_on_the_same_slot_keeps_the_first_name(tmp_path):
     session.add_file(1, 0, str(first))
     session.add_file(1, 0, str(second))
     assert session.layout.cards[0].slots[0].title == ""
-    assert session.view()["cards"][0]["slots"][0]["filename"] == "甲001：先頭.pdf"
+    assert session.view()["cards"][0]["slots"][0]["filename"] == "甲001 先頭.pdf"
 
 
 def test_blank_title_follows_a_replaced_file_and_a_typed_title_stays(tmp_path):
@@ -217,11 +217,11 @@ def test_blank_title_follows_a_replaced_file_and_a_typed_title_stays(tmp_path):
     session = Session(tmp_path)
     session.add_file(1, 0, str(first))
     session.replace_slot(1, 0, [str(second)])
-    assert session.view()["cards"][0]["slots"][0]["filename"] == "甲001：新しい.pdf"
+    assert session.view()["cards"][0]["slots"][0]["filename"] == "甲001 新しい.pdf"
     session.set_title(1, "固定")
     session.replace_slot(1, 0, [str(first)])
     assert session.layout.cards[0].slots[0].title == "固定"
-    assert session.view()["cards"][0]["slots"][0]["filename"] == "甲001：固定.pdf"
+    assert session.view()["cards"][0]["slots"][0]["filename"] == "甲001 固定.pdf"
 
 
 def test_legacy_card_title_copies_only_onto_slots_without_a_title(tmp_path):
@@ -252,19 +252,19 @@ def test_legacy_card_title_copies_only_onto_slots_without_a_title(tmp_path):
     assert session.layout.cards[0].slots[0].title == "契約書"
     assert session.layout.cards[0].slots[1].title == ""
     slots = session.view()["cards"][0]["slots"]
-    assert slots[0]["filename"] == "甲001-1：契約書.pdf"
-    assert slots[1]["filename"] == "甲001-2：残す.pdf"
+    assert slots[0]["filename"] == "甲001-1 契約書.pdf"
+    assert slots[1]["filename"] == "甲001-2 残す.pdf"
     session.add_branch(1)
     session.add_file(1, 2, str(added))
     slots = session.view()["cards"][0]["slots"]
     assert session.layout.cards[0].slots[2].title == ""
-    assert slots[0]["filename"] == "甲001-1：契約書.pdf"
-    assert slots[2]["filename"] == "甲001-3：足した.pdf"
+    assert slots[0]["filename"] == "甲001-1 契約書.pdf"
+    assert slots[2]["filename"] == "甲001-3 足した.pdf"
     built = jobs_from_layout(session.layout, tmp_path)
     assert [job.filename for job in built.jobs] == [
-        "甲001-1：契約書.pdf",
-        "甲001-2：残す.pdf",
-        "甲001-3：足した.pdf",
+        "甲001-1 契約書.pdf",
+        "甲001-2 残す.pdf",
+        "甲001-3 足した.pdf",
     ]
 
 
@@ -285,7 +285,7 @@ def test_unreadable_branch_preserves_each_slots_filename(tmp_path):
     session.add_file(1, 1, str(other))
     built = jobs_from_layout(session.layout, tmp_path)
     assert built.jobs == ()
-    assert built.preserve == ("甲001-1：壊れ.pdf", "甲001-2：別.pdf")
+    assert built.preserve == ("甲001-1 壊れ.pdf", "甲001-2 別.pdf")
 
 
 def test_branch_rotation_stays_on_that_slot(tmp_path):

@@ -10,7 +10,7 @@ from ctypes import wintypes
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from .names import branch_number, display_label, document_title, output_filename
+from .names import branch_number, check_separator, display_label, document_title, output_filename
 from .layout import (
     OUTPUT_DIR_NAME,
     Card,
@@ -131,6 +131,8 @@ class Session:
             "series": self.layout.series,
             "labelTemplate": self.layout.label_template,
             "grayscale": self.layout.grayscale,
+            "filenameSeparator": self.layout.filename_separator,
+            "mergeBranches": self.layout.merge_branches,
             "stamp": _stamp_view(self.layout.stamp),
             "enabledSeries": list(self.layout.enabled_series),
             "canAddSeries": len(self.layout.enabled_series) < 5,
@@ -292,15 +294,25 @@ class Session:
 
     @_locked
     def set_grayscale(self, enabled: bool) -> dict:
-        self.layout = Layout(
-            series=self.layout.series,
-            enabled_series=self.layout.enabled_series,
-            cards=self.layout.cards,
-            last_written=self.layout.last_written,
-            label_template=self.layout.label_template,
-            grayscale=enabled is True,
-            stamp=self.layout.stamp,
-        )
+        self.layout = replace(self.layout, grayscale=enabled is True)
+        self._persist()
+        return self.view()
+
+    @_locked
+    def set_filename_separator(self, separator: str) -> dict:
+        chosen = check_separator(separator)
+        if chosen == self.layout.filename_separator:
+            return self.view()
+        self.layout = replace(self.layout, filename_separator=chosen)
+        self._persist()
+        return self.view()
+
+    @_locked
+    def set_merge_branches(self, enabled: bool) -> dict:
+        chosen = enabled is True
+        if chosen == self.layout.merge_branches:
+            return self.view()
+        self.layout = replace(self.layout, merge_branches=chosen)
         self._persist()
         return self.view()
 
@@ -798,7 +810,7 @@ class Session:
         }
 
     def preview(self, number: int, slot_index: int, page_index: int, zoom: float = 1.15, bare: bool = False) -> dict:
-        from .plan import jobs_from_layout
+        from .plan import jobs_from_layout, slot_job
         from .stamp import render_stamped_page_jpeg, skew_lookup, trim_lookup
 
         with self._lock:
@@ -809,10 +821,7 @@ class Session:
             tilt = card.slots[int(slot_index)].rotation
             split = card.split_a4
         built = jobs_from_layout(layout, folder)
-        job = next(
-            (item for item in built.jobs if item.number == int(number) and item.slot_index == int(slot_index)),
-            None,
-        )
+        job = slot_job(built.jobs, int(number), int(slot_index))
         if job is None:
             raise ValueError("プレビューできるPDFがありません。")
         pages = tuple(job.pages) if job.pages is not None else None
@@ -901,15 +910,7 @@ class Session:
                 number = _number_for_filename(built.jobs, row["filename"])
                 if number is not None:
                     self.card_errors[number] = row["message"]
-            self.layout = Layout(
-                series=self.layout.series,
-                enabled_series=self.layout.enabled_series,
-                cards=self.layout.cards,
-                last_written=result["keep"],
-                label_template=self.layout.label_template,
-                grayscale=self.layout.grayscale,
-                stamp=self.layout.stamp,
-            )
+            self.layout = replace(self.layout, last_written=result["keep"])
             self._persist()
             written = len(result["written"])
             failed = len(result["errors"]) + len(built.errors)
@@ -926,8 +927,19 @@ class Session:
                 "written": result["written"],
                 "errors": result["errors"],
                 **self.view(),
-                "message": message,
-            }
+            "message": message,
+        }
+
+    def evidence_list(self) -> dict:
+        """号証と書名を、出力順のタブ区切りで返す。画面がクリップボードへ載せる。"""
+        from .plan import evidence_tsv, jobs_from_layout
+
+        with self._lock:
+            folder = self.folder if self.folder is not None else Path(".")
+            layout = self.layout
+        text = evidence_tsv(jobs_from_layout(layout, folder).jobs)
+        rows = 0 if not text else text.count("\n") + 1
+        return {"text": text, "rows": rows}
 
     def _card_view(self, card: Card) -> dict:
         slot_count = len(card.slots)
@@ -949,15 +961,43 @@ class Session:
             "splitA4": card.split_a4,
             "slots": slots,
             "hasFile": any(slot.files for slot in card.slots),
+            "mergedFilename": self._merged_filename(card),
             "message": self.card_errors.get(card.number, ""),
         }
+
+    def _merged_filename(self, card: Card) -> str:
+        """枝番をまとめるときの出力名。ファイルの無い枝番は範囲に入れない。"""
+        if not self.layout.merge_branches:
+            return ""
+        filled = [index for index, slot in enumerate(card.slots) if slot.files]
+        if len(filled) < 2:
+            return ""
+        slot_count = len(card.slots)
+        first = filled[0]
+        last = filled[-1]
+        slot = card.slots[first]
+        title = document_title(slot.title, slot.files[0] if slot.files else None)
+        return output_filename(
+            self.layout.label_template,
+            card.number,
+            branch_number(first, slot_count),
+            title,
+            separator=self.layout.filename_separator,
+            branch_end=branch_number(last, slot_count),
+        )
 
     def _slot_filename(self, card: Card, slot_index: int) -> str:
         slot = card.slots[slot_index]
         first = slot.files[0] if slot.files else None
         title = document_title(slot.title, first)
         branch = branch_number(slot_index, len(card.slots))
-        return output_filename(self.layout.label_template, card.number, branch, title)
+        return output_filename(
+            self.layout.label_template,
+            card.number,
+            branch,
+            title,
+            separator=self.layout.filename_separator,
+        )
 
     def _card(self, number: int) -> Card:
         for card in self.layout.cards:
@@ -983,15 +1023,7 @@ class Session:
         self._persist()
 
     def _with_cards(self, cards: tuple[Card, ...]) -> Layout:
-        return Layout(
-            series=self.layout.series,
-            enabled_series=self.layout.enabled_series,
-            cards=cards,
-            last_written=self.layout.last_written,
-            label_template=self.layout.label_template,
-            grayscale=self.layout.grayscale,
-            stamp=self.layout.stamp,
-        )
+        return replace(self.layout, cards=cards)
 
     def _persist(self) -> None:
         if self.folder is not None:

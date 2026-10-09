@@ -361,11 +361,14 @@ def stamp_sources_to_pdf(
     trims: dict[tuple[int, int, int], PageTrim] | None = None,
     skews: dict[tuple[int, int], int] | None = None,
     style: StampStyle | None = None,
+    parts=None,
 ) -> bytes:
     """原本を順にA4縦へ載せる。証拠番号は出力の1ページ目だけに押す。
 
     2ページ目以降には印を足さない。
     pages を渡したときは、その (原本, ページ, 部分) だけをその順で出す。
+    parts を渡したときは、枝番ごとにその並びを続け、各枝番の先頭ページだけにその印を押す。
+    枝番ごとの回転と印の位置は、その part の rotation、stamp_dx、stamp_dy を使う。
     grayscale のときは、載せたページをグレーにしてから印を押す。
     stamp_dx と stamp_dy は、右上の既定位置からの点。正は右と下。
     masks は原本ページ上の矩形。載せたあとに墨消し、そのあとで印を押す。
@@ -382,23 +385,33 @@ def stamp_sources_to_pdf(
     try:
         placed = 0
 
-        def place(source, source_index: int, index: int, clip, part: int) -> None:
+        def place_run(run_label: str, run_tilt: int, run_pages, run_dx: int, run_dy: int) -> None:
             nonlocal placed
-            skew_tenths = _skew_for(skews, source_index, index)
-            page, limit = _place_page(
-                output, source, index, tilt, clip, grayscale=grayscale,
-                trim=_trim_for(trims, source_index, index, part),
-                skew_tenths=skew_tenths,
-            )
-            _redact_masks(
-                page, source[index], source_index, index, clip, tilt, masks,
-                limit=limit, skew_tenths=skew_tenths,
-            )
-            if placed == 0:
-                _draw_stamp(page, label, font_path, box_w, box_h, stamp_dx, stamp_dy, chosen)
-            placed += 1
+            start = placed
 
-        _for_each_placement(source_paths, split, pages, place)
+            def place(source, source_index: int, index: int, clip, piece: int) -> None:
+                nonlocal placed
+                skew_tenths = _skew_for(skews, source_index, index)
+                page, limit = _place_page(
+                    output, source, index, run_tilt, clip, grayscale=grayscale,
+                    trim=_trim_for(trims, source_index, index, piece),
+                    skew_tenths=skew_tenths,
+                )
+                _redact_masks(
+                    page, source[index], source_index, index, clip, run_tilt, masks,
+                    limit=limit, skew_tenths=skew_tenths,
+                )
+                if placed == start:
+                    _draw_stamp(page, run_label, font_path, box_w, box_h, run_dx, run_dy, chosen)
+                placed += 1
+
+            _for_each_placement(source_paths, split, run_pages, place)
+
+        if parts:
+            for run in parts:
+                place_run(run.stamp, int(run.rotation), run.pages, int(run.stamp_dx), int(run.stamp_dy))
+        else:
+            place_run(label, tilt, pages, stamp_dx, stamp_dy)
         if placed <= 0:
             raise ValueError("ページがありません。")
         return output.tobytes()

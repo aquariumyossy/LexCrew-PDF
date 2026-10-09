@@ -56,7 +56,7 @@ def test_custom_template_numbers_the_cards(tmp_path):
     session = Session(tmp_path)
     view = session.set_series("資料N")
     assert [card["label"] for card in view["cards"][:3]] == ["資料１", "資料２", "資料３"]
-    assert view["cards"][0]["slots"][0]["filename"].startswith("資料001：")
+    assert view["cards"][0]["slots"][0]["filename"].startswith("資料001 ")
     body = tmp_path / "body.pdf"
     branch = tmp_path / "branch.pdf"
     _pdf(body, ("BODY",))
@@ -66,8 +66,8 @@ def test_custom_template_numbers_the_cards(tmp_path):
     session.add_file(1, 1, str(branch))
     card = session.view()["cards"][0]
     assert [slot["label"] for slot in card["slots"]] == ["資料１の１", "資料１の２"]
-    assert card["slots"][0]["filename"].startswith("資料001-1：")
-    assert card["slots"][1]["filename"].startswith("資料001-2：")
+    assert card["slots"][0]["filename"].startswith("資料001-1 ")
+    assert card["slots"][1]["filename"].startswith("資料001-2 ")
 
 
 def test_branch_relabels_the_body():
@@ -133,7 +133,7 @@ def test_generate_skips_empty_cards(tmp_path):
     result = session.generate()
     written = list((tmp_path / "LexCrew-PDF-Downloads").glob("*.pdf"))
     assert len(written) == 1
-    assert written[0].name.startswith("甲001：")
+    assert written[0].name.startswith("甲001 ")
     assert result["ok"] is True
 
 
@@ -263,7 +263,7 @@ def test_page_edit_changes_generate_order(tmp_path):
         {"source": 0, "page": 0, "part": 0, "group": 0},
     ])
     session.generate()
-    document = fitz.open(tmp_path / "LexCrew-PDF-Downloads" / "甲001：two.pdf")
+    document = fitz.open(tmp_path / "LexCrew-PDF-Downloads" / "甲001 two.pdf")
     try:
         assert "SECONDPAGE" in document[0].get_text("text")
         assert document.page_count == 1
@@ -311,7 +311,7 @@ def test_rotated_landscape_a4_is_splittable_and_generate_doubles_pages(tmp_path)
     assert before["slots"][0]["pageCount"] == 2
     session.set_split(1, True)
     session.generate()
-    document = fitz.open(tmp_path / "LexCrew-PDF-Downloads" / "甲001：spread.pdf")
+    document = fitz.open(tmp_path / "LexCrew-PDF-Downloads" / "甲001 spread.pdf")
     try:
         assert document.page_count == 4
         assert "LEFTSIDE" in document[0].get_text("text")
@@ -342,13 +342,13 @@ def test_missing_font_on_generate_keeps_previous_output(tmp_path, monkeypatch):
     _pdf(source, ("A",))
     session = Session(tmp_path)
     session.add_file(1, 0, str(source))
-    dest = tmp_path / "LexCrew-PDF-Downloads" / "甲001：a.pdf"
+    dest = tmp_path / "LexCrew-PDF-Downloads" / "甲001 a.pdf"
     dest.write_bytes(b"stay")
     session.layout = session.layout.__class__(
         series=session.layout.series,
         enabled_series=session.layout.enabled_series,
         cards=session.layout.cards,
-        last_written=("甲001：a.pdf",),
+        last_written=("甲001 a.pdf",),
         label_template=session.layout.label_template,
     )
     monkeypatch.setattr("lexcrew_pdf.stamp.yu_mincho_path", lambda: str(tmp_path / "missing.ttf"))
@@ -466,7 +466,7 @@ def test_delete_moves_later_numbers_up(tmp_path):
     assert [card["number"] for card in view["cards"]] == [1, 2, 3, 4, 5]
     assert view["cards"][1]["slots"][0]["title"] == "残る"
     assert view["cards"][1]["title"] == "残る"
-    assert view["cards"][1]["slots"][0]["filename"].startswith("甲002：")
+    assert view["cards"][1]["slots"][0]["filename"].startswith("甲002 ")
 
 
 def test_delete_branch_closes_the_gap_and_renames(tmp_path):
@@ -486,8 +486,8 @@ def test_delete_branch_closes_the_gap_and_renames(tmp_path):
     slots = view["cards"][0]["slots"]
     assert [slot["label"] for slot in slots] == ["甲第１号証の１", "甲第１号証の２"]
     assert [slot["files"][0]["name"] for slot in slots] == ["a.pdf", "c.pdf"]
-    assert slots[0]["filename"].startswith("甲001-1：")
-    assert slots[1]["filename"].startswith("甲001-2：")
+    assert slots[0]["filename"].startswith("甲001-1 ")
+    assert slots[1]["filename"].startswith("甲001-2 ")
 
 
 def test_delete_last_branch_drops_the_branch_mark(tmp_path):
@@ -503,7 +503,7 @@ def test_delete_last_branch_drops_the_branch_mark(tmp_path):
     card = next(item for item in view["cards"] if item["number"] == 4)
     assert card["label"] == "甲第４号証"
     assert card["slots"][0]["files"][0]["name"] == "branch.pdf"
-    assert card["slots"][0]["filename"] == "甲004：branch.pdf"
+    assert card["slots"][0]["filename"] == "甲004 branch.pdf"
     assert view["cards"][4]["number"] == 5
 
 
@@ -656,9 +656,9 @@ def test_move_plain_card_renumbers_title_and_filename(tmp_path):
     session.card_errors[3] = "開けません。"
     view = session.move_slot(3, 0, 1)
     assert [card["slots"][0]["title"] for card in view["cards"][:3]] == ["さん", "いち", "に"]
-    assert view["cards"][0]["slots"][0]["filename"] == "甲001：さん.pdf"
+    assert view["cards"][0]["slots"][0]["filename"] == "甲001 さん.pdf"
     assert view["cards"][0]["label"] == "甲第１号証"
-    assert view["cards"][1]["slots"][0]["filename"] == "甲002：いち.pdf"
+    assert view["cards"][1]["slots"][0]["filename"] == "甲002 いち.pdf"
     assert view["cards"][2]["label"] == "甲第３号証"
     assert view["cards"][0]["message"] == "開けません。"
     assert view["cards"][2]["message"] == ""
@@ -696,19 +696,19 @@ def test_move_branch_to_the_front_drops_the_branch_mark(tmp_path):
     moved = view["cards"][0]
     assert moved["label"] == "甲第１号証"
     assert len(moved["slots"]) == 1
-    assert moved["slots"][0]["filename"] == "甲001：branch.pdf"
+    assert moved["slots"][0]["filename"] == "甲001 branch.pdf"
     assert moved["slots"][0]["rotation"] == 90
     assert moved["message"] == ""
     assert view["cards"][1]["slots"][0]["title"] == "いち"
     left = view["cards"][2]
     assert left["label"] == "甲第３号証"
-    assert left["slots"][0]["filename"] == "甲003：body.pdf"
+    assert left["slots"][0]["filename"] == "甲003 body.pdf"
     assert left["message"] == "開けません。"
     assert view["cards"][3]["slots"][0]["title"] == "さん"
     built = jobs_from_layout(session.layout, tmp_path)
     assert [(job.stamp, job.filename) for job in built.jobs] == [
-        ("甲第１号証", "甲001：branch.pdf"),
-        ("甲第３号証", "甲003：body.pdf"),
+        ("甲第１号証", "甲001 branch.pdf"),
+        ("甲第３号証", "甲003 body.pdf"),
     ]
 
 
@@ -726,12 +726,12 @@ def test_move_middle_branch_keeps_the_other_two(tmp_path):
     view = session.move_slot(2, 1, 1)
     assert view["cards"][0]["label"] == "甲第１号証"
     assert view["cards"][0]["slots"][0]["files"][0]["name"] == "b.pdf"
-    assert view["cards"][0]["slots"][0]["filename"] == "甲001：b.pdf"
+    assert view["cards"][0]["slots"][0]["filename"] == "甲001 b.pdf"
     kept = view["cards"][2]
     assert [slot["files"][0]["name"] for slot in kept["slots"]] == ["a.pdf", "c.pdf"]
     assert [slot["label"] for slot in kept["slots"]] == ["甲第３号証の１", "甲第３号証の２"]
-    assert kept["slots"][0]["filename"] == "甲003-1：a.pdf"
-    assert kept["slots"][1]["filename"] == "甲003-2：c.pdf"
+    assert kept["slots"][0]["filename"] == "甲003-1 a.pdf"
+    assert kept["slots"][1]["filename"] == "甲003-2 c.pdf"
 
 
 def test_move_branch_carries_pages_and_split_without_opening_pdfs(tmp_path, monkeypatch):
@@ -850,11 +850,11 @@ def _write_layout(folder: Path, title: str) -> None:
 def test_legacy_output_folder_is_renamed_on_startup(tmp_path):
     legacy = tmp_path / "証拠"
     _write_layout(legacy, "引き継ぎ")
-    (legacy / "甲001：引き継ぎ.pdf").write_bytes(b"stay")
+    (legacy / "甲001 引き継ぎ.pdf").write_bytes(b"stay")
     session = Session(tmp_path)
     current = tmp_path / "LexCrew-PDF-Downloads"
     assert not legacy.exists()
-    assert (current / "甲001：引き継ぎ.pdf").read_bytes() == b"stay"
+    assert (current / "甲001 引き継ぎ.pdf").read_bytes() == b"stay"
     assert session.layout.cards[0].slots[0].title == "引き継ぎ"
     assert session.view()["outputDir"] == str(current)
     again = Session(tmp_path)
@@ -876,11 +876,11 @@ def test_legacy_folder_stays_when_the_new_folder_exists(tmp_path):
 def test_mistaken_output_folder_is_renamed(tmp_path):
     legacy = tmp_path / "LexCrew-PDF"
     _write_layout(legacy, "直前")
-    (legacy / "甲001：直前.pdf").write_bytes(b"pdf")
+    (legacy / "甲001 直前.pdf").write_bytes(b"pdf")
     session = Session(tmp_path)
     dest = tmp_path / "LexCrew-PDF-Downloads"
     assert not legacy.exists()
-    assert (dest / "甲001：直前.pdf").read_bytes() == b"pdf"
+    assert (dest / "甲001 直前.pdf").read_bytes() == b"pdf"
     assert session.layout.cards[0].slots[0].title == "直前"
 
 
@@ -895,18 +895,18 @@ def test_application_folder_keeps_its_name_and_outputs_move_out(tmp_path):
             "labelTemplate": "甲第N号証",
             "enabledSeries": ["甲", "乙", "丙"],
             "cards": [{"number": 1, "slots": [{"title": "アプリ内", "files": []}]}],
-            "lastWritten": ["甲001：アプリ内.pdf"],
+            "lastWritten": ["甲001 アプリ内.pdf"],
         }, ensure_ascii=False),
         encoding="utf-8",
     )
-    (app / "甲001：アプリ内.pdf").write_bytes(b"out")
+    (app / "甲001 アプリ内.pdf").write_bytes(b"out")
     session = Session(tmp_path)
     dest = tmp_path / "LexCrew-PDF-Downloads"
     assert (app / "LexCrew-PDF.bat").is_file()
     assert (app / "原本.pdf").read_bytes() == b"src"
     assert not (app / "layout.json").exists()
-    assert not (app / "甲001：アプリ内.pdf").exists()
-    assert (dest / "甲001：アプリ内.pdf").read_bytes() == b"out"
+    assert not (app / "甲001 アプリ内.pdf").exists()
+    assert (dest / "甲001 アプリ内.pdf").read_bytes() == b"out"
     assert session.layout.cards[0].slots[0].title == "アプリ内"
 
 
@@ -948,7 +948,7 @@ def test_generate_opens_the_folder_when_some_files_fail(tmp_path, monkeypatch):
     def partial():
         return {
             "ok": False,
-            "written": [{"filename": "甲001：a.pdf"}],
+            "written": [{"filename": "甲001 a.pdf"}],
             "outputDir": str(output),
             "message": "一部は保存できませんでした。",
         }

@@ -3,10 +3,18 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
-from .names import INITIAL_SERIES, SERIES, canonical_template, check_series, filename_prefix
+from .names import (
+    DEFAULT_SEPARATOR,
+    INITIAL_SERIES,
+    SERIES,
+    canonical_template,
+    check_separator,
+    check_series,
+    filename_prefix,
+)
 from .stamp import DEFAULT_STAMP, StampStyle, stamp_record, stamp_style_from_json
 
 LAYOUT_NAME = "layout.json"
@@ -82,6 +90,8 @@ class Layout:
     label_template: str
     grayscale: bool = False
     stamp: StampStyle = DEFAULT_STAMP
+    filename_separator: str = DEFAULT_SEPARATOR
+    merge_branches: bool = False
 
 
 def default_layout() -> Layout:
@@ -93,6 +103,8 @@ def default_layout() -> Layout:
         label_template="甲第N号証",
         grayscale=False,
         stamp=DEFAULT_STAMP,
+        filename_separator=DEFAULT_SEPARATOR,
+        merge_branches=False,
     )
 
 
@@ -217,6 +229,15 @@ def parse_layout(raw: dict) -> Layout:
     last_written = tuple(_check_output_name(str(name)) for name in last)
     if "grayscale" in raw and raw.get("grayscale") is not True and raw.get("grayscale") is not False:
         raise ValueError("配置ファイルを読めません。")
+    if "filenameSeparator" in raw:
+        try:
+            filename_separator = check_separator(raw.get("filenameSeparator"))
+        except ValueError:
+            raise ValueError("配置ファイルを読めません。") from None
+    else:
+        filename_separator = DEFAULT_SEPARATOR
+    if "mergeBranches" in raw and raw.get("mergeBranches") is not True and raw.get("mergeBranches") is not False:
+        raise ValueError("配置ファイルを読めません。")
     return Layout(
         series=series,
         enabled_series=enabled_series,
@@ -225,6 +246,8 @@ def parse_layout(raw: dict) -> Layout:
         label_template=label_template,
         grayscale=raw.get("grayscale") is True,
         stamp=stamp,
+        filename_separator=filename_separator,
+        merge_branches=raw.get("mergeBranches") is True,
     )
 
 
@@ -288,6 +311,10 @@ def layout_to_json(layout: Layout) -> dict:
     }
     if layout.grayscale:
         payload["grayscale"] = True
+    if layout.filename_separator != DEFAULT_SEPARATOR:
+        payload["filenameSeparator"] = layout.filename_separator
+    if layout.merge_branches:
+        payload["mergeBranches"] = True
     record = stamp_record(layout.stamp)
     if record is not None:
         payload["stamp"] = record
@@ -321,14 +348,10 @@ def resolve_stored_path(folder: Path, stored: str) -> Path:
 
 def with_series(layout: Layout, series: str) -> Layout:
     template = canonical_template(series)
-    return Layout(
+    return replace(
+        layout,
         series=filename_prefix(template),
-        enabled_series=layout.enabled_series,
-        cards=layout.cards,
-        last_written=layout.last_written,
         label_template=template,
-        grayscale=layout.grayscale,
-        stamp=layout.stamp,
     )
 
 
@@ -338,15 +361,7 @@ def with_next_series(layout: Layout) -> Layout:
     for series in SERIES:
         if series not in enabled:
             enabled.append(series)
-            return Layout(
-                series=layout.series,
-                enabled_series=tuple(enabled),
-                cards=layout.cards,
-                last_written=layout.last_written,
-                label_template=layout.label_template,
-                grayscale=layout.grayscale,
-                stamp=layout.stamp,
-            )
+            return replace(layout, enabled_series=tuple(enabled))
     return layout
 
 

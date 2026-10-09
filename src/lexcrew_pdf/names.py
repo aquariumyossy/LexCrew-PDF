@@ -1,4 +1,4 @@
-"""ファイル名と印の文字。種類は甲乙丙丁戊。疎甲などは見出しをそのまま使う。"""
+"""ファイル名と印の文字。種類は甲乙丙丁戊。疎甲や乙Aは、その見出しをファイル名の頭に使う。"""
 from __future__ import annotations
 
 import re
@@ -7,10 +7,29 @@ from pathlib import Path
 SERIES = ("甲", "乙", "丙", "丁", "戊")
 INITIAL_SERIES = ("甲", "乙", "丙")
 
-_FILENAME_COLON = "："
+SEPARATOR_SPACE = " "
+SEPARATOR_COLON = "："
+DEFAULT_SEPARATOR = SEPARATOR_SPACE
+_SEPARATORS = (SEPARATOR_SPACE, SEPARATOR_COLON)
 _ILLEGAL_FILENAME = set('\\/:*?"<>|')
-_MAX_TITLE_CHARS = 120
+# mints の提出マニュアル。拡張子を含めたファイル名の上限。
+MAX_FILENAME_CHARS = 100
 _FULLWIDTH_DIGITS = str.maketrans("0123456789", "０１２３４５６７８９")
+_LATIN_LETTER = r"[A-Za-z\uff21-\uff3a\uff41-\uff5a]"
+_KO_TEMPLATE = re.compile(rf"^([甲乙丙丁戊])({_LATIN_LETTER})?第N号証$")
+_SO_TEMPLATE = re.compile(rf"^疎([甲乙丙])({_LATIN_LETTER})?第N号証$")
+# 原本名の先頭だけ。甲1 、甲第2号証_、乙3の1 、甲001-1~3 を外し、甲府や金額は残す。
+_EXHIBIT_SEP = r"[ \t\u3000:：_＿]*"
+_EXHIBIT_TAIL = r"(?:[ \t\u3000:：_＿]+|$)"
+_LEADING_EXHIBIT = re.compile(
+    r"^(?:疎)?[甲乙丙丁戊][A-Za-zＡ-Ｚａ-ｚ]?"
+    r"(?:"
+    rf"第[0-9０-９]+号証(?:の[0-9０-９]+)?{_EXHIBIT_SEP}"
+    rf"|[0-9０-９]+号証(?:の[0-9０-９]+)?{_EXHIBIT_SEP}"
+    rf"|[0-9０-９]+(?:の[0-9０-９]+|-[0-9０-９]+(?:[~〜～][0-9０-９]+)?){_EXHIBIT_TAIL}"
+    rf"|[0-9０-９]+{_EXHIBIT_TAIL}"
+    r")"
+)
 
 
 def fullwidth_digits(number: int) -> str:
@@ -21,6 +40,13 @@ def check_series(series: str) -> str:
     if series not in SERIES:
         raise ValueError(f"証拠の種類を読めません: {series}")
     return series
+
+
+def check_separator(value: str) -> str:
+    """ファイル名の区切り。半角スペースか、これまでの全角コロン。"""
+    if not isinstance(value, str) or value not in _SEPARATORS:
+        raise ValueError("ファイル名の区切りは半角スペースか全角コロンです。")
+    return value
 
 
 def canonical_template(value: str) -> str:
@@ -38,19 +64,15 @@ def canonical_template(value: str) -> str:
     return text
 
 
-_KO_TEMPLATE = re.compile(r"^([甲乙丙丁戊])第N号証$")
-_SO_TEMPLATE = re.compile(r"^疎([甲乙丙])第N号証$")
-
-
 def filename_prefix(template: str) -> str:
-    """甲第N号証は甲。疎甲第N号証は疎甲。別紙N や資料N は N より前の文字。"""
+    """甲第N号証は甲。乙A第N号証は乙A。疎甲第N号証は疎甲。別紙N は N より前の文字。"""
     text = canonical_template(template)
     so = _SO_TEMPLATE.fullmatch(text)
     if so:
-        return "疎" + so.group(1)
+        return "疎" + so.group(1) + _halfwidth_latin(so.group(2) or "")
     ko = _KO_TEMPLATE.fullmatch(text)
     if ko:
-        return ko.group(1)
+        return ko.group(1) + _halfwidth_latin(ko.group(2) or "")
     head = text.split("N", 1)[0]
     prefix = "".join(ch for ch in head if ord(ch) >= 32 and ch not in _ILLEGAL_FILENAME).strip(" .")
     if prefix:
@@ -91,7 +113,10 @@ def stamp_label(series: str, number: int, branch: int | None) -> str:
 
 
 def document_title(typed: str, first_file: str | None) -> str:
-    """保存した書名。空なら、その枝番の先頭 PDF から拡張子を除く。"""
+    """保存した書名。空なら、その枝番の先頭 PDF から拡張子を除く。
+
+    原本名の先頭に号証番号があるときは外す。手入力の書名はそのまま残す。
+    """
     title = (typed or "").strip()
     if title:
         return title
@@ -99,31 +124,91 @@ def document_title(typed: str, first_file: str | None) -> str:
         return ""
     name = Path(first_file).name
     if name.lower().endswith(".pdf"):
-        return name[:-4]
-    return name
+        name = name[:-4]
+    return strip_leading_exhibit_number(name)
 
 
-def output_filename(series: str, number: int, branch: int | None, title: str) -> str:
-    """ファイル名の番号は半角3桁。区切りは全角コロン。枝番は半角ハイフン。"""
+def strip_leading_exhibit_number(name: str) -> str:
+    """先頭の号証番号と、その直後の区切りを外す。無ければそのまま。"""
+    text = (name or "").strip()
+    match = _LEADING_EXHIBIT.match(text)
+    if not match:
+        return text
+    return text[match.end():].strip()
+
+
+def output_filename(
+    series: str,
+    number: int,
+    branch: int | None,
+    title: str,
+    *,
+    separator: str | None = None,
+    branch_end: int | None = None,
+) -> str:
+    """ファイル名の番号は半角3桁。枝番は半角ハイフン。範囲は 1~3。
+
+    区切りの初期値は半角スペース。全角コロンも選べる。
+    `.pdf` を含めて 100 文字に収まるよう、書名の後ろを切る。
+    """
     if number < 1:
         raise ValueError("証拠番号が不正です。")
+    sep = DEFAULT_SEPARATOR if separator is None else check_separator(separator)
     prefix = filename_prefix(series)
-    safe = sanitize_filename_title(title)
-    if branch:
-        if branch < 1:
-            raise ValueError("枝番が不正です。")
-        return f"{prefix}{number:03d}-{branch}{_FILENAME_COLON}{safe}.pdf"
-    return f"{prefix}{number:03d}{_FILENAME_COLON}{safe}.pdf"
+    head = prefix + _number_token(number, branch, branch_end)
+    suffix = ".pdf"
+    budget = MAX_FILENAME_CHARS - len(head) - len(sep) - len(suffix)
+    safe = _fit_filename_title(title, budget)
+    return f"{head}{sep}{safe}{suffix}"
 
 
 def sanitize_filename_title(title: str) -> str:
-    """Windows のファイル名に使えない文字を除く。全角コロンは残す。"""
+    """Windows のファイル名に使えない文字を除く。全角コロンは残す。長さは切らない。"""
     kept: list[str] = []
     for ch in title or "":
         if ord(ch) < 32 or ch in _ILLEGAL_FILENAME:
             continue
         kept.append(ch)
-    cleaned = "".join(kept).strip(" .")
-    if len(cleaned) > _MAX_TITLE_CHARS:
-        cleaned = cleaned[:_MAX_TITLE_CHARS].strip(" .")
-    return cleaned or "証拠"
+    return "".join(kept).strip(" .")
+
+
+def _number_token(number: int, branch: int | None, branch_end: int | None) -> str:
+    token = f"{number:03d}"
+    if branch is None:
+        if branch_end is not None:
+            raise ValueError("枝番が不正です。")
+        return token
+    if branch < 1:
+        raise ValueError("枝番が不正です。")
+    if branch_end is None or branch_end == branch:
+        return f"{token}-{branch}"
+    if branch_end < branch:
+        raise ValueError("枝番が不正です。")
+    return f"{token}-{branch}~{branch_end}"
+
+
+def _fit_filename_title(title: str, budget: int) -> str:
+    """書名を予算内へ切る。切れ端の空白とピリオドは残さない。空なら「証拠」。"""
+    cleaned = sanitize_filename_title(title)
+    if not cleaned:
+        cleaned = "証拠"
+    if budget < 1:
+        budget = 1
+    if len(cleaned) > budget:
+        cleaned = cleaned[:budget].strip(" .")
+    if not cleaned:
+        cleaned = "証拠" if budget >= 2 else "証"
+        cleaned = cleaned[:budget]
+    return cleaned
+
+
+def _halfwidth_latin(text: str) -> str:
+    """全角の英字だけを半角にする。乙Ａ のファイル名は乙A。"""
+    chars = []
+    for ch in text:
+        code = ord(ch)
+        if 0xFF21 <= code <= 0xFF3A or 0xFF41 <= code <= 0xFF5A:
+            chars.append(chr(code - 0xFEE0))
+        else:
+            chars.append(ch)
+    return "".join(chars)

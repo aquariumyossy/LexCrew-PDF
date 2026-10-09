@@ -44,6 +44,7 @@ def write_jobs(
                 trims=trim_lookup(job.trims),
                 skews=skew_lookup(job.skews),
                 style=style,
+                parts=job.parts or None,
             )
             dest.mkdir(parents=True, exist_ok=True)
             target = _checked_output_path(dest, job.filename)

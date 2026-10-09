@@ -218,6 +218,14 @@
       background: #d6e4ff;
       color: var(--accent);
     }
+    .separator-field {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 13px;
+      color: var(--muted);
+    }
+    .separator-field select { color: var(--text); }
     #output { flex: 1 1 220px; margin: 0; font-size: 12px; color: var(--muted); }
     #banner { margin: 0 16px 10px; font-size: 13px; }
     #cards {
@@ -425,11 +433,19 @@
         <li><button type="button" data-value="資料N">資料N</button></li>
       </ul>
     </div>
+    <label class="separator-field">区切り
+      <select id="name-separator" aria-label="ファイル名の区切り">
+        <option value="space">半角スペース</option>
+        <option value="colon">全角コロン</option>
+      </select>
+    </label>
     <p id="output"></p>
     <div class="header-actions">
       <button id="help-open" class="btn" type="button">使い方</button>
       <button id="clear" class="btn danger" type="button">クリア</button>
       <button id="stamp-open" class="btn" type="button">スタンプ</button>
+      <button id="merge-branches" class="btn" type="button" aria-pressed="false">枝番をまとめる</button>
+      <button id="copy-list" class="btn" type="button">一覧をコピー</button>
       <button id="grayscale" class="btn" type="button" aria-pressed="false">白黒</button>
       <button id="generate" class="btn primary" type="button">証拠PDFを生成</button>
     </div>
@@ -444,11 +460,14 @@
     <h2 id="help-title">使い方</h2>
     <ol class="steps">
       <li>起動すると、保存されたカードがあればそれを出します。無ければ甲第１号証から甲第６号証までの空のカードが6枚出ます。</li>
-      <li>ヘッダーの欄で番号の形を選びます。選べるのは甲第N号証、乙第N号証、丙第N号証、疎甲第N号証、疎乙第N号証、疎丙第N号証、別紙N、資料Nです。</li>
+      <li>ヘッダーの欄で番号の形を選びます。選べるのは甲第N号証、乙第N号証、丙第N号証、疎甲第N号証、疎乙第N号証、疎丙第N号証、別紙N、資料Nです。乙A第N号証のように、甲乙丙丁戊のあとに英字1字を書いた形も使えます。ファイル名は乙A001になります。</li>
       <li>PDF の無いカードは、中央の「ファイルを追加」で足します。カードへドロップしても足せます。ファイルがあるカードは「差替」と「右に90°」を使います。サムネイルへ別の PDF をドロップすると差替になります。</li>
       <li>「枝番」を押すと、の１、の２が別のカードになります。ページの無い枝番は PDF を出しません。</li>
+      <li>「枝番をまとめる」を押すと、同じ号証の枝番を1つのPDFにします。名前は「甲001-1~3 書名.pdf」のように、最初の枝番から最後の枝番を~でつなぎます。書名は最初の枝番の書名です。各枝番の先頭ページに、その枝番の印が付きます。押していないときは、枝番ごとに別のPDFです。</li>
       <li>末尾の「カードを追加」で次の番号を足します。「削除」でそのカードを消すと、後ろの番号が詰まります。右下のつまみで順番を変えると、証拠番号、印、ファイル名が付いて変わります。</li>
-      <li>書名が空のときは、そのカードへ最初に足した PDF のファイル名から拡張子を除いた名前を使います。</li>
+      <li>書名が空のときは、そのカードへ最初に足したPDFのファイル名から拡張子を除いた名前を使います。先頭に「甲1 」や「甲第2号証_」や「乙3の1 」のような号証番号があるときは、それを除きます。</li>
+      <li>「区切り」で、ファイル名の番号と書名のあいだを半角スペースか全角コロンにします。初期値は半角スペースで、「甲001 売買契約書.pdf」になります。ファイル名は.pdfを含めて100文字までです。長い書名は後ろを切ります。</li>
+      <li>「一覧をコピー」で、号証と書名をタブ区切りでコピーします。枝番も1行です。ExcelやWordの証拠説明書へ貼れます。</li>
       <li>A3 の見開きには「A4分割」が出ます。左から右へ A4 にします。</li>
       <li>サムネイルをクリックすると編集ウィンドウが開きます。編集中のカードは、メイン画面で差替、回転、削除ができません。</li>
       <li>「証拠PDFを生成」で、ダウンロードフォルダの「LexCrew-PDF-Downloads」に印付き PDF を書きます。1件以上書けたときは、そのフォルダをエクスプローラーで開きます。ヘッダーに保存先が出ます。カードを変えるたびに、同じフォルダの layout.json を上書きします。原本の PDF はコピーしません。</li>

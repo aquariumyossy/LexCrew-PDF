@@ -50,6 +50,14 @@ async function refreshApp() {
 function render() {
   const series = document.getElementById("series");
   if (document.activeElement !== series) series.value = view.labelTemplate || "";
+  const separator = document.getElementById("name-separator");
+  if (document.activeElement !== separator) {
+    separator.value = view.filenameSeparator === "：" ? "colon" : "space";
+  }
+  const merge = document.getElementById("merge-branches");
+  const merged = Boolean(view.mergeBranches);
+  merge.classList.toggle("is-on", merged);
+  merge.setAttribute("aria-pressed", merged ? "true" : "false");
   document.getElementById("output").textContent = view.outputDir ? `保存先 ${view.outputDir}` : "";
   const grayscale = document.getElementById("grayscale");
   const gray = Boolean(view.grayscale);
@@ -141,6 +149,12 @@ function slotCard(card, slot, isLast) {
   title.disabled = locked;
   title.addEventListener("change", () => api.set_title(card.number, titleFromFilename(title.value), slot.index).then(applyView));
   meta.append(label, title);
+  if (slot.index === 0 && card.mergedFilename) {
+    const merged = document.createElement("div");
+    merged.className = "evidence-source";
+    merged.textContent = `まとめて ${card.mergedFilename}`;
+    meta.appendChild(merged);
+  }
 
   if (filled) {
     for (const file of slot.files) {
@@ -205,10 +219,8 @@ function slotCard(card, slot, isLast) {
 
 function titleFromFilename(text) {
   const value = String(text || "").trim();
-  const marked = value.match(/^[^\d]+\d{3}(?:-\d+)?：(.+?)(?:\.pdf)?$/);
+  const marked = value.match(/^[^\d]+\d{3}(?:-\d+(?:~\d+)?)?[ ：:](.+?)(?:\.pdf)?$/);
   if (marked) return marked[1];
-  const half = value.match(/^[^\d]+\d{3}(?:-\d+)?:(.+?)(?:\.pdf)?$/);
-  if (half) return half[1];
   return value.replace(/\.pdf$/i, "");
 }
 
@@ -462,6 +474,63 @@ cardList.addEventListener("drop", (event) => {
   });
 });
 
+document.getElementById("name-separator").addEventListener("change", async () => {
+  if (!api || !view) return;
+  const chosen = document.getElementById("name-separator").value === "colon" ? "：" : " ";
+  const result = await api.set_filename_separator(chosen);
+  if (result && result.ok === false && result.message) showBanner(result.message);
+  applyView(result);
+});
+
+document.getElementById("merge-branches").addEventListener("click", async () => {
+  if (!api || !view) return;
+  const result = await api.set_merge_branches(!view.mergeBranches);
+  if (result && result.ok === false && result.message) showBanner(result.message);
+  applyView(result);
+});
+
+document.getElementById("copy-list").addEventListener("click", () => copyEvidenceList());
+
+async function copyEvidenceList() {
+  if (!api) return;
+  const result = await api.evidence_list();
+  if (!result || result.ok === false) {
+    showBanner(result && result.message ? result.message : "一覧をコピーできませんでした。");
+    return;
+  }
+  if (!result.text) {
+    showBanner("コピーする号証がありません。");
+    return;
+  }
+  const copied = await copyText(result.text);
+  showBanner(copied ? "証拠説明書用の一覧をコピーしました。" : "一覧をコピーできませんでした。");
+}
+
+async function copyText(text) {
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch (error) {
+    // WebView2 で拒否されたときは、下の選択コピーへ落とす。
+  }
+  try {
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.setAttribute("readonly", "");
+    area.style.position = "fixed";
+    area.style.left = "-1000px";
+    document.body.appendChild(area);
+    area.select();
+    const ok = document.execCommand("copy");
+    area.remove();
+    return ok;
+  } catch (error) {
+    return false;
+  }
+}
+
 document.getElementById("grayscale").addEventListener("click", async () => {
   if (!api || !view) return;
   const result = await api.set_grayscale(!view.grayscale);
@@ -472,7 +541,7 @@ document.getElementById("grayscale").addEventListener("click", async () => {
 document.getElementById("clear").addEventListener("click", async () => {
   if (!api || generating) return;
   const editing = Boolean(view && view.editor);
-  let message = "カードを初期状態に戻します。原本、書名、枝番、追加したカード、ページ順、番号の種類、白黒、印の色、印の大きさ、印のフォントは消え、甲第１号証から甲第６号証の空のカードになります。生成済みの証拠PDFは残ります。";
+  let message = "カードを初期状態に戻します。原本、書名、枝番、追加したカード、ページ順、番号の種類、ファイル名の区切り、枝番のまとめ、白黒、印の色、印の大きさ、印のフォントは消え、甲第１号証から甲第６号証の空のカードになります。生成済みの証拠PDFは残ります。";
   if (editing) message += "開いている編集ウィンドウも閉じます。";
   if (!window.confirm(message)) return;
   const button = document.getElementById("clear");

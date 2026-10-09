@@ -9,6 +9,7 @@ from lexcrew_pdf.stamp import (
     STAMP_MARGIN_PT,
     PageTrim,
     StampFontMissing,
+    StampStyle,
     _draw_stamp,
     _stamp_box,
     describe_source_pages,
@@ -20,6 +21,7 @@ from lexcrew_pdf.stamp import (
     stamp_frame,
     stamp_sources_to_pdf,
     viewer_rotate,
+    yu_gothic_path,
     yu_mincho_path,
 )
 
@@ -1043,5 +1045,45 @@ def test_bare_preview_omits_the_red_frame(tmp_path):
     document = fitz.open(stream=bare, filetype="jpeg")
     try:
         assert _red_drawings(document[0]) == []
+    finally:
+        document.close()
+
+
+def _blue(color) -> bool:
+    return bool(color) and len(color) >= 3 and color[2] > 0.8 and color[0] < 0.2 and color[1] < 0.2
+
+
+def test_chosen_stamp_is_blue_18pt_gothic(tmp_path):
+    _require_font()
+    if not os.path.isfile(yu_gothic_path()):
+        pytest.skip("游ゴシックがありません")
+    source = tmp_path / "a.pdf"
+    _write_pdf(source, width=595, height=842, text="BODY")
+    style = StampStyle((0, 0, 1), 18, "gothic")
+    document = _open_stamped(stamp_sources_to_pdf([str(source)], "甲第１号証", style=style))
+    try:
+        page = document[0]
+        drawings = [item for item in page.get_drawings() if _blue(item.get("color"))]
+        assert len(drawings) == 1
+        assert drawings[0].get("fill") in (None, ())
+        span = _stamp_span(page, "甲第１号証")
+        assert span["size"] == 18
+        assert span["color"] == 255
+        assert any("Gothic" in font[3] for font in page.get_fonts())
+        assert abs(drawings[0]["rect"].x1 - (page.rect.width - STAMP_MARGIN_PT)) < 1.5
+    finally:
+        document.close()
+
+
+def test_grayscale_keeps_the_chosen_blue_stamp(tmp_path):
+    _require_font()
+    source = tmp_path / "a.pdf"
+    _write_pdf(source, width=595, height=842, text="BODY")
+    style = StampStyle((0, 0, 1), 11, "mincho")
+    document = _open_stamped(stamp_sources_to_pdf([str(source)], "甲第１号証", grayscale=True, style=style))
+    try:
+        page = document[0]
+        assert any(_blue(item.get("color")) for item in page.get_drawings())
+        assert _stamp_span(page, "甲第１号証")["color"] == 255
     finally:
         document.close()

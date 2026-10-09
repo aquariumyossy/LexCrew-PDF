@@ -131,6 +131,7 @@ class Session:
             "series": self.layout.series,
             "labelTemplate": self.layout.label_template,
             "grayscale": self.layout.grayscale,
+            "stamp": _stamp_view(self.layout.stamp),
             "enabledSeries": list(self.layout.enabled_series),
             "canAddSeries": len(self.layout.enabled_series) < 5,
             "message": self.notice,
@@ -179,7 +180,7 @@ class Session:
             "split": card.split_a4,
             "pageWidth": width,
             "pageHeight": height,
-            "stampFrame": stamp_frame(slot.stamp_dx, slot.stamp_dy),
+            "stampFrame": stamp_frame(slot.stamp_dx, slot.stamp_dy, self.layout.stamp),
         }
 
     @_locked
@@ -298,7 +299,20 @@ class Session:
             last_written=self.layout.last_written,
             label_template=self.layout.label_template,
             grayscale=enabled is True,
+            stamp=self.layout.stamp,
         )
+        self._persist()
+        return self.view()
+
+    @_locked
+    def set_stamp_style(self, color, size, font) -> dict:
+        from .stamp import require_stamp_font, stamp_style_from_request
+
+        style = stamp_style_from_request(color, size, font)
+        require_stamp_font(style)
+        if style == self.layout.stamp:
+            return self.view()
+        self.layout = replace(self.layout, stamp=style)
         self._persist()
         return self.view()
 
@@ -358,16 +372,15 @@ class Session:
 
     @_locked
     def set_stamp_offset(self, number: int, slot_index: int, dx: int, dy: int) -> dict:
-        from .stamp import StampFontMissing, stamp_frame
+        from .stamp import StampFontMissing, require_stamp_font, stamp_frame
 
         card = self._card(int(number))
         slot_index = int(slot_index)
         _check_slot(card, slot_index)
-        frame = stamp_frame(_point(dx), _point(dy))
+        require_stamp_font(self.layout.stamp, placing=True)
+        frame = stamp_frame(_point(dx), _point(dy), self.layout.stamp)
         if frame is None:
-            raise StampFontMissing(
-                "游明朝（yumin.ttf）が見つからないため、証拠番号の位置を決められません。"
-            )
+            raise StampFontMissing("証拠番号の位置を決められません。")
         slots = list(card.slots)
         slots[slot_index] = replace(slots[slot_index], stamp_dx=frame["dx"], stamp_dy=frame["dy"])
         self._put(_replace(card, slots=tuple(slots)))
@@ -727,6 +740,7 @@ class Session:
             page_rows = _rows(card.pages)
             template = self.layout.label_template
             grayscale = self.layout.grayscale
+            style = self.layout.stamp
             masks = card.masks
             trims = card.trims
             skews = card.skews
@@ -759,6 +773,7 @@ class Session:
                     stamp_dx=stamp_dx,
                     stamp_dy=stamp_dy,
                     masks=masks,
+                    style=style,
                     trims=trim_map,
                     skews=skew_map,
                 )
@@ -815,6 +830,7 @@ class Session:
             draw_stamp=not bare,
             # 編集画面の黒は要素が描く。ここに焼くと、X で外した直後に下の画像が残る。
             masks=(),
+            style=layout.stamp,
             trims=trim_lookup(job.trims),
             skews=skew_lookup(job.skews),
         )
@@ -866,6 +882,7 @@ class Session:
             layout = self.layout
             last_written = layout.last_written
             grayscale = layout.grayscale
+            style = layout.stamp
         built = jobs_from_layout(layout, folder)
         try:
             result = write_jobs(
@@ -874,6 +891,7 @@ class Session:
                 last_written=last_written,
                 preserve=built.preserve,
                 grayscale=grayscale,
+                style=style,
             )
         except StampFontMissing as exc:
             return {"ok": False, **self.view(), "message": str(exc)}
@@ -890,6 +908,7 @@ class Session:
                 last_written=result["keep"],
                 label_template=self.layout.label_template,
                 grayscale=self.layout.grayscale,
+                stamp=self.layout.stamp,
             )
             self._persist()
             written = len(result["written"])
@@ -971,6 +990,7 @@ class Session:
             last_written=self.layout.last_written,
             label_template=self.layout.label_template,
             grayscale=self.layout.grayscale,
+            stamp=self.layout.stamp,
         )
 
     def _persist(self) -> None:
@@ -1018,6 +1038,12 @@ def _point(value) -> int:
 
 def directory_message() -> str:
     return "フォルダを確認できません。"
+
+
+def _stamp_view(style) -> dict:
+    from .stamp import stamp_view
+
+    return stamp_view(style)
 
 
 def _empty(number: int) -> Card:

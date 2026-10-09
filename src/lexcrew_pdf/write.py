@@ -6,7 +6,7 @@ from pathlib import Path
 
 from .layout import OUTPUT_DIR_NAME
 from .plan import OutputJob
-from .stamp import StampFontMissing, require_yu_mincho, skew_lookup, stamp_sources_to_pdf, trim_lookup
+from .stamp import StampFontMissing, require_stamp_font, skew_lookup, stamp_sources_to_pdf, trim_lookup
 
 
 def write_jobs(
@@ -16,12 +16,13 @@ def write_jobs(
     last_written: tuple[str, ...] | list[str],
     preserve: tuple[str, ...] | list[str] = (),
     grayscale: bool = False,
+    style=None,
 ) -> dict:
     """ジョブを書き、last_written から外れた前回分だけを消す。
 
-    游明朝が無いときは、何も書かず何も消さない。
+    選んだ印のフォントが無いときは、何も書かず何も消さない。
     """
-    require_yu_mincho()
+    require_stamp_font(style)
     dest = folder / OUTPUT_DIR_NAME
     written: list[dict] = []
     errors: list[dict] = []
@@ -42,6 +43,7 @@ def write_jobs(
                 masks=job.masks,
                 trims=trim_lookup(job.trims),
                 skews=skew_lookup(job.skews),
+                style=style,
             )
             dest.mkdir(parents=True, exist_ok=True)
             target = _checked_output_path(dest, job.filename)

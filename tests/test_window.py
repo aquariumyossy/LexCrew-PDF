@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import fitz
@@ -11,7 +12,7 @@ import pytest
 
 from lexcrew_pdf.layout import PageRow
 from lexcrew_pdf.session import Session, _replace, downloads_dir
-from lexcrew_pdf.stamp import yu_mincho_path
+from lexcrew_pdf.stamp import StampFontMissing, StampStyle, yu_mincho_path
 from lexcrew_pdf import window as app_window
 
 
@@ -355,6 +356,24 @@ def test_missing_font_on_generate_keeps_previous_output(tmp_path, monkeypatch):
     assert result["ok"] is False
     assert "游明朝" in result["message"]
     assert dest.read_bytes() == b"stay"
+
+
+def test_missing_gothic_and_a_bad_color_do_not_change_the_stamp(tmp_path, monkeypatch):
+    session = Session(tmp_path)
+    api = app_window.Api(session)
+    monkeypatch.setattr("lexcrew_pdf.stamp.yu_gothic_path", lambda: str(tmp_path / "missing.ttc"))
+    refused = api.set_stamp_style("#000000", 12, "gothic")
+    assert refused["ok"] is False
+    assert "游ゴシック" in refused["message"]
+    assert refused["stamp"] == {"color": "#ff0000", "size": 11, "font": "mincho"}
+    invalid = api.set_stamp_style("#112233", 11, "mincho")
+    assert invalid["ok"] is False
+    assert invalid["message"] == "色は赤、青、緑、黒から選んでください。"
+    assert session.layout.stamp.font == "mincho"
+    session.layout = replace(session.layout, stamp=StampStyle((0, 0, 0), 12, "gothic"))
+    with pytest.raises(StampFontMissing, match="游ゴシック"):
+        session.set_stamp_offset(1, 0, 10, 10)
+    assert session.layout.cards[0].slots[0].stamp_dx == 0
 
 
 def test_broken_layout_keeps_the_cards(tmp_path):

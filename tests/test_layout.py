@@ -118,6 +118,7 @@ def test_filled_branch_becomes_two_files(tmp_path):
     _pdf(body, "BODY")
     _pdf(branch, "BRANCH")
     session = Session(tmp_path)
+    session.set_merge_branches(False)
     session.add_file(4, 0, str(body))
     session.add_branch(4)
     session.add_file(4, 1, str(branch))
@@ -138,8 +139,10 @@ def test_card_field_shows_the_output_filename(tmp_path):
     session.add_branch(4)
     session.add_file(4, 1, str(source))
     slots = session.view()["cards"][3]["slots"]
-    assert slots[0]["filename"] == "甲004-1 賃貸借契約書.pdf"
-    assert slots[1]["filename"] == "甲004-2 賃貸借契約書.pdf"
+    assert slots[0]["filename"] == "甲004-1~2 賃貸借契約書.pdf"
+    assert slots[1]["filename"] == "甲004-1~2 賃貸借契約書.pdf"
+    assert slots[0]["outputNote"] == "→ 甲004-1~2 に含めて出力"
+    assert slots[1]["outputNote"] == "→ 甲004-1~2 に含めて出力"
 
 
 def test_blank_title_uses_the_file_stem(tmp_path):
@@ -181,14 +184,16 @@ def test_branch_filename_uses_that_slots_file(tmp_path):
     session.add_branch(1)
     session.add_file(1, 1, str(second))
     slots = session.view()["cards"][0]["slots"]
-    assert slots[0]["filename"] == "乙001-1 5.建物評価証明書.pdf"
-    assert slots[1]["filename"] == "乙001-2 3.賃貸人会社謄本.pdf"
+    assert slots[0]["filename"] == "乙001-1~2 5.建物評価証明書.pdf"
+    assert slots[1]["filename"] == "乙001-1~2 5.建物評価証明書.pdf"
     built = jobs_from_layout(session.layout, tmp_path)
-    assert [job.filename for job in built.jobs] == [
-        "乙001-1 5.建物評価証明書.pdf",
-        "乙001-2 3.賃貸人会社謄本.pdf",
-    ]
+    assert built.jobs[0].filename == "乙001-1~2 5.建物評価証明書.pdf"
+    assert [part.title for part in built.jobs[0].parts] == ["5.建物評価証明書", "3.賃貸人会社謄本"]
     session.set_title(1, "手入力", 1)
+    slots = session.view()["cards"][0]["slots"]
+    assert slots[0]["filename"] == "乙001-1~2 5.建物評価証明書.pdf"
+    assert slots[1]["title"] == "手入力"
+    session.set_merge_branches(False)
     slots = session.view()["cards"][0]["slots"]
     assert slots[0]["filename"] == "乙001-1 5.建物評価証明書.pdf"
     assert slots[1]["filename"] == "乙001-2 手入力.pdf"
@@ -252,20 +257,17 @@ def test_legacy_card_title_copies_only_onto_slots_without_a_title(tmp_path):
     assert session.layout.cards[0].slots[0].title == "契約書"
     assert session.layout.cards[0].slots[1].title == ""
     slots = session.view()["cards"][0]["slots"]
-    assert slots[0]["filename"] == "甲001-1 契約書.pdf"
-    assert slots[1]["filename"] == "甲001-2 残す.pdf"
+    assert slots[0]["filename"] == "甲001-1~2 契約書.pdf"
+    assert slots[1]["filename"] == "甲001-1~2 契約書.pdf"
     session.add_branch(1)
     session.add_file(1, 2, str(added))
     slots = session.view()["cards"][0]["slots"]
     assert session.layout.cards[0].slots[2].title == ""
-    assert slots[0]["filename"] == "甲001-1 契約書.pdf"
-    assert slots[2]["filename"] == "甲001-3 足した.pdf"
+    assert slots[0]["filename"] == "甲001-1~3 契約書.pdf"
+    assert slots[2]["filename"] == "甲001-1~3 契約書.pdf"
     built = jobs_from_layout(session.layout, tmp_path)
-    assert [job.filename for job in built.jobs] == [
-        "甲001-1 契約書.pdf",
-        "甲001-2 残す.pdf",
-        "甲001-3 足した.pdf",
-    ]
+    assert built.jobs[0].filename == "甲001-1~3 契約書.pdf"
+    assert [part.title for part in built.jobs[0].parts] == ["契約書", "残す", "足した"]
 
 
 def test_set_title_rejects_a_missing_slot(tmp_path):
@@ -285,6 +287,9 @@ def test_unreadable_branch_preserves_each_slots_filename(tmp_path):
     session.add_file(1, 1, str(other))
     built = jobs_from_layout(session.layout, tmp_path)
     assert built.jobs == ()
+    assert built.preserve == ("甲001-1~2 壊れ.pdf",)
+    session.set_merge_branches(False)
+    built = jobs_from_layout(session.layout, tmp_path)
     assert built.preserve == ("甲001-1 壊れ.pdf", "甲001-2 別.pdf")
 
 
@@ -305,7 +310,7 @@ def test_branch_rotation_stays_on_that_slot(tmp_path):
     assert view[0]["rotation"] == 90
     assert view[1]["rotation"] == 0
     built = jobs_from_layout(session.layout, tmp_path)
-    assert [job.rotation for job in built.jobs] == [90, 0]
+    assert [part.rotation for part in built.jobs[0].parts] == [90, 0]
     session.rotate(1, 1)
     assert session.layout.cards[0].slots[0].rotation == 90
     assert session.layout.cards[0].slots[1].rotation == 90

@@ -137,6 +137,18 @@ def strip_leading_exhibit_number(name: str) -> str:
     return text[match.end():].strip()
 
 
+def filename_stem_token(
+    series: str,
+    number: int,
+    branch: int | None,
+    branch_end: int | None = None,
+) -> str:
+    """甲001-1~3。書名と拡張子は付けない。カードの「含めて出力」に使う。"""
+    if number < 1:
+        raise ValueError("証拠番号が不正です。")
+    return filename_prefix(series) + _number_token(number, branch, branch_end)
+
+
 def output_filename(
     series: str,
     number: int,

@@ -912,6 +912,24 @@ class Session:
                     self.card_errors[number] = row["message"]
             self.layout = replace(self.layout, last_written=result["keep"])
             self._persist()
+            for row in built.warnings:
+                if row["number"] in self.card_errors:
+                    continue
+                card = next((item for item in self.layout.cards if item.number == row["number"]), None)
+                if card is None:
+                    continue
+                from .plan import file_merge_choice
+
+                # 空の枝番は、カードを開かなくても案内を出す。ここは出すページが無いときだけ足す。
+                structural = file_merge_choice(
+                    self.layout.label_template,
+                    card,
+                    self.layout.filename_separator,
+                    self.layout.merge_branches,
+                )
+                if structural.warning:
+                    continue
+                self.card_errors[row["number"]] = row["message"]
             written = len(result["written"])
             failed = len(result["errors"]) + len(built.errors)
             if written and failed:
@@ -922,6 +940,8 @@ class Session:
                 message = "保存するPDFがありません。"
             else:
                 message = f"{written}件を {folder / OUTPUT_DIR_NAME} に保存しました。"
+            if built.warnings:
+                message = f"{message} " + " ".join(row["message"] for row in built.warnings)
             return {
                 "ok": failed == 0,
                 "written": result["written"],
@@ -942,15 +962,25 @@ class Session:
         return {"text": text, "rows": rows}
 
     def _card_view(self, card: Card) -> dict:
+        from .plan import file_merge_choice
+
         slot_count = len(card.slots)
+        choice = file_merge_choice(
+            self.layout.label_template,
+            card,
+            self.layout.filename_separator,
+            self.layout.merge_branches,
+        )
         slots = []
         for index, slot in enumerate(card.slots):
+            included = index in choice.included
             slots.append({
                 "index": index,
                 "label": display_label(self.layout.label_template, card.number, index, slot_count),
-                "filename": self._slot_filename(card, index),
+                "filename": choice.filename if choice.filename and (index == 0 or included) else self._slot_filename(card, index),
                 "title": slot.title,
                 "rotation": slot.rotation,
+                "outputNote": f"→ {choice.token} に含めて出力" if included else "",
                 "files": [{"index": file_index, "name": Path(stored).name, "stored": stored} for file_index, stored in enumerate(slot.files)],
             })
         return {
@@ -961,30 +991,10 @@ class Session:
             "splitA4": card.split_a4,
             "slots": slots,
             "hasFile": any(slot.files for slot in card.slots),
-            "mergedFilename": self._merged_filename(card),
+            "mergedFilename": choice.filename,
+            "mergeWarning": choice.warning,
             "message": self.card_errors.get(card.number, ""),
         }
-
-    def _merged_filename(self, card: Card) -> str:
-        """枝番をまとめるときの出力名。ファイルの無い枝番は範囲に入れない。"""
-        if not self.layout.merge_branches:
-            return ""
-        filled = [index for index, slot in enumerate(card.slots) if slot.files]
-        if len(filled) < 2:
-            return ""
-        slot_count = len(card.slots)
-        first = filled[0]
-        last = filled[-1]
-        slot = card.slots[first]
-        title = document_title(slot.title, slot.files[0] if slot.files else None)
-        return output_filename(
-            self.layout.label_template,
-            card.number,
-            branch_number(first, slot_count),
-            title,
-            separator=self.layout.filename_separator,
-            branch_end=branch_number(last, slot_count),
-        )
 
     def _slot_filename(self, card: Card, slot_index: int) -> str:
         slot = card.slots[slot_index]

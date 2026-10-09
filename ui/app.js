@@ -54,10 +54,6 @@ function render() {
   if (document.activeElement !== separator) {
     separator.value = view.filenameSeparator === "：" ? "colon" : "space";
   }
-  const merge = document.getElementById("merge-branches");
-  const merged = Boolean(view.mergeBranches);
-  merge.classList.toggle("is-on", merged);
-  merge.setAttribute("aria-pressed", merged ? "true" : "false");
   document.getElementById("output").textContent = view.outputDir ? `保存先 ${view.outputDir}` : "";
   const grayscale = document.getElementById("grayscale");
   const gray = Boolean(view.grayscale);
@@ -142,18 +138,48 @@ function slotCard(card, slot, isLast) {
   const label = document.createElement("div");
   label.className = "evidence-label";
   label.textContent = slot.label;
+  const sharesFile = Boolean(slot.outputNote) && slot.index !== 0;
   const title = document.createElement("input");
   title.className = "evidence-name";
   title.value = slot.filename || "";
-  title.setAttribute("aria-label", "ファイル名");
+  title.setAttribute("aria-label", sharesFile ? "出力ファイル名" : "ファイル名");
   title.disabled = locked;
-  title.addEventListener("change", () => api.set_title(card.number, titleFromFilename(title.value), slot.index).then(applyView));
+  title.readOnly = sharesFile;
+  if (!sharesFile) {
+    title.addEventListener("change", () => api.set_title(card.number, titleFromFilename(title.value), slot.index).then(applyView));
+  }
   meta.append(label, title);
-  if (slot.index === 0 && card.mergedFilename) {
-    const merged = document.createElement("div");
-    merged.className = "evidence-source";
-    merged.textContent = `まとめて ${card.mergedFilename}`;
-    meta.appendChild(merged);
+  if (sharesFile) {
+    const docTitle = document.createElement("input");
+    docTitle.className = "evidence-name evidence-doc-title";
+    docTitle.value = slot.title || "";
+    docTitle.placeholder = "書名";
+    docTitle.setAttribute("aria-label", "書名");
+    docTitle.disabled = locked;
+    docTitle.addEventListener("change", () => api.set_title(card.number, docTitle.value, slot.index).then(applyView));
+    meta.appendChild(docTitle);
+  }
+  if (slot.outputNote) {
+    const note = document.createElement("div");
+    note.className = "evidence-source";
+    note.textContent = slot.outputNote;
+    meta.appendChild(note);
+  }
+  if (slot.index === 0 && card.slots.length > 1) {
+    const separate = !view.mergeBranches;
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = separate ? "btn mini evidence-merge is-on" : "btn mini evidence-merge";
+    toggle.textContent = "枝番ごとに出力";
+    toggle.setAttribute("aria-pressed", separate ? "true" : "false");
+    toggle.addEventListener("click", () => api.set_merge_branches(!view.mergeBranches).then(applyView));
+    meta.appendChild(toggle);
+  }
+  if (slot.index === 0 && card.mergeWarning) {
+    const warn = document.createElement("p");
+    warn.className = "evidence-message";
+    warn.textContent = card.mergeWarning;
+    meta.appendChild(warn);
   }
 
   if (filled) {
@@ -478,13 +504,6 @@ document.getElementById("name-separator").addEventListener("change", async () =>
   if (!api || !view) return;
   const chosen = document.getElementById("name-separator").value === "colon" ? "：" : " ";
   const result = await api.set_filename_separator(chosen);
-  if (result && result.ok === false && result.message) showBanner(result.message);
-  applyView(result);
-});
-
-document.getElementById("merge-branches").addEventListener("click", async () => {
-  if (!api || !view) return;
-  const result = await api.set_merge_branches(!view.mergeBranches);
   if (result && result.ok === false && result.message) showBanner(result.message);
   applyView(result);
 });

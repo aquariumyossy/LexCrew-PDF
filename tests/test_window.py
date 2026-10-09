@@ -66,8 +66,9 @@ def test_custom_template_numbers_the_cards(tmp_path):
     session.add_file(1, 1, str(branch))
     card = session.view()["cards"][0]
     assert [slot["label"] for slot in card["slots"]] == ["資料１の１", "資料１の２"]
-    assert card["slots"][0]["filename"].startswith("資料001-1 ")
-    assert card["slots"][1]["filename"].startswith("資料001-2 ")
+    assert card["slots"][0]["filename"].startswith("資料001-1~2 ")
+    assert card["slots"][1]["filename"].startswith("資料001-1~2 ")
+    assert card["slots"][1]["outputNote"] == "→ 資料001-1~2 に含めて出力"
 
 
 def test_branch_relabels_the_body():
@@ -486,8 +487,8 @@ def test_delete_branch_closes_the_gap_and_renames(tmp_path):
     slots = view["cards"][0]["slots"]
     assert [slot["label"] for slot in slots] == ["甲第１号証の１", "甲第１号証の２"]
     assert [slot["files"][0]["name"] for slot in slots] == ["a.pdf", "c.pdf"]
-    assert slots[0]["filename"].startswith("甲001-1 ")
-    assert slots[1]["filename"].startswith("甲001-2 ")
+    assert slots[0]["filename"].startswith("甲001-1~2 ")
+    assert slots[1]["filename"].startswith("甲001-1~2 ")
 
 
 def test_delete_last_branch_drops_the_branch_mark(tmp_path):
@@ -730,8 +731,8 @@ def test_move_middle_branch_keeps_the_other_two(tmp_path):
     kept = view["cards"][2]
     assert [slot["files"][0]["name"] for slot in kept["slots"]] == ["a.pdf", "c.pdf"]
     assert [slot["label"] for slot in kept["slots"]] == ["甲第３号証の１", "甲第３号証の２"]
-    assert kept["slots"][0]["filename"] == "甲003-1 a.pdf"
-    assert kept["slots"][1]["filename"] == "甲003-2 c.pdf"
+    assert kept["slots"][0]["filename"] == "甲003-1~2 a.pdf"
+    assert kept["slots"][1]["filename"] == "甲003-1~2 a.pdf"
 
 
 def test_move_branch_carries_pages_and_split_without_opening_pdfs(tmp_path, monkeypatch):

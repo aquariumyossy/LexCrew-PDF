@@ -5,7 +5,14 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .layout import Card, Layout, PageRow, Slot, resolve_stored_path
-from .names import branch_number, document_title, output_filename, stamp_label
+from .names import (
+    branch_number,
+    display_label,
+    document_title,
+    filename_stem_token,
+    output_filename,
+    stamp_label,
+)
 from .pages import GROUP_PRIMARY, resolve_buckets
 from .stamp import inspect_source_pages
 
@@ -47,14 +54,26 @@ class PlanBuild:
     jobs: tuple[OutputJob, ...]
     errors: tuple[dict, ...]
     preserve: tuple[str, ...]
+    warnings: tuple[dict, ...] = ()
+
+
+@dataclass(frozen=True)
+class MergeChoice:
+    """PDF を開かずに決める、枝番を1ファイルにするかどうか。"""
+
+    filename: str = ""
+    token: str = ""
+    included: tuple[int, ...] = ()
+    warning: str = ""
 
 
 def jobs_from_layout(layout: Layout, folder: Path) -> PlanBuild:
     jobs: list[OutputJob] = []
     errors: list[dict] = []
     preserve: list[str] = []
+    warnings: list[dict] = []
     for card in layout.cards:
-        built, card_errors, card_preserve = _jobs_for_card(
+        built, card_errors, card_preserve, card_warnings = _jobs_for_card(
             layout.label_template,
             card,
             folder,
@@ -64,7 +83,13 @@ def jobs_from_layout(layout: Layout, folder: Path) -> PlanBuild:
         jobs.extend(built)
         errors.extend(card_errors)
         preserve.extend(card_preserve)
-    return PlanBuild(jobs=tuple(jobs), errors=tuple(errors), preserve=tuple(preserve))
+        warnings.extend(card_warnings)
+    return PlanBuild(
+        jobs=tuple(jobs),
+        errors=tuple(errors),
+        preserve=tuple(preserve),
+        warnings=tuple(warnings),
+    )
 
 
 def slot_job(jobs, number: int, slot_index: int) -> OutputJob | None:
@@ -111,10 +136,10 @@ def _jobs_for_card(
     *,
     separator: str,
     merge_branches: bool,
-) -> tuple[list[OutputJob], list[dict], list[str]]:
+) -> tuple[list[OutputJob], list[dict], list[str], list[dict]]:
     flat = _flat_files(card)
     if not flat:
-        return [], [], []
+        return [], [], [], []
     resolved = tuple(str(resolve_stored_path(folder, stored)) for stored in flat)
     files_per_slot = [len(slot.files) for slot in card.slots]
     try:
@@ -122,11 +147,11 @@ def _jobs_for_card(
     except Exception as exc:
         return [], [_card_error(card, f"原本を開けません。{exc}")], _fallback_names(
             series, card, files_per_slot, separator=separator, merge_branches=merge_branches,
-        )
+        ), []
     if not natural:
         return [], [_card_error(card, "ページがありません。")], _fallback_names(
             series, card, files_per_slot, separator=separator, merge_branches=merge_branches,
-        )
+        ), []
     rows = _page_rows(card.pages)
     buckets = resolve_buckets(list(natural), rows, files_per_slot)
     jobs: list[OutputJob] = []
@@ -158,9 +183,87 @@ def _jobs_for_card(
             skews=card.skews,
             title=title,
         ))
+    # 印の番号はカードの枝番のまま。空の枝番や、出すページの無い枝番で番号が飛ぶときは、
+    # 1~3 のような範囲にせず、枝番ごとに出す。カードを消せば番号は詰まる。
     if merge_branches and len(jobs) >= 2 and all(job.pages is not None for job in jobs):
-        return [_merged_job(series, card, jobs, separator)], [], []
-    return jobs, [], []
+        indexes = [job.slot_index for job in jobs]
+        if indexes == list(range(indexes[0], indexes[-1] + 1)):
+            return [_merged_job(series, card, jobs, separator)], [], [], []
+        missing = [index for index in range(indexes[0], indexes[-1] + 1) if index not in indexes]
+        return jobs, [], [], [{
+            "number": card.number,
+            "message": branch_gap_warning(series, card, missing),
+        }]
+    return jobs, [], [], []
+
+
+def file_merge_choice(series: str, card: Card, separator: str, merge_branches: bool) -> MergeChoice:
+    """ファイルのある枝番だけで合体を決める。原本は開かない。"""
+    if not merge_branches or len(card.slots) < 2:
+        return MergeChoice()
+    filled = [index for index, slot in enumerate(card.slots) if slot.files]
+    if len(filled) < 2:
+        return MergeChoice()
+    expected = list(range(filled[0], filled[-1] + 1))
+    if filled != expected:
+        missing = [index for index in expected if index not in set(filled)]
+        return MergeChoice(warning=branch_gap_warning(series, card, missing))
+    slot_count = len(card.slots)
+    start = branch_number(filled[0], slot_count)
+    end = branch_number(filled[-1], slot_count)
+    title = merged_document_title(card)
+    return MergeChoice(
+        filename=output_filename(
+            series, card.number, start, title, separator=separator, branch_end=end,
+        ),
+        token=filename_stem_token(series, card.number, start, end),
+        included=tuple(filled),
+    )
+
+
+def merged_document_title(card: Card) -> str:
+    """まとめた PDF の書名。親（最初の枝番）の書名を優先し、空なら後の枝番へ落ちる。"""
+    first = card.slots[0]
+    title = document_title(first.title, first.files[0] if first.files else None)
+    if title:
+        return title
+    for slot in card.slots[1:]:
+        title = document_title(slot.title, slot.files[0] if slot.files else None)
+        if title:
+            return title
+    return ""
+
+
+def branch_gap_warning(series: str, card: Card, missing: list[int]) -> str:
+    """番号が飛ぶのでまとめない、という案内。印の番号は付け替えない。"""
+    slot_count = len(card.slots)
+    empty = []
+    excluded = []
+    for index in missing:
+        label = display_label(series, card.number, index, slot_count)
+        if card.slots[index].files:
+            excluded.append(label)
+        else:
+            empty.append(label)
+    parts = []
+    if empty:
+        parts.append(f"{_and_join(empty)}にPDFが無い")
+    if excluded:
+        parts.append(f"{_and_join(excluded)}に出すページが無い")
+    reason = "、".join(parts)
+    if excluded and not empty:
+        tail = "その枝番を削除すると、残った番号が詰まります。"
+    else:
+        tail = "空の枝番を削除すると番号が詰まります。"
+    return f"{reason}ため、まとめて出力しません。{tail}"
+
+
+def _and_join(labels: list[str]) -> str:
+    if len(labels) == 1:
+        return labels[0]
+    if len(labels) == 2:
+        return f"{labels[0]}と{labels[1]}"
+    return "、".join(labels[:-1]) + "と" + labels[-1]
 
 
 def _merged_job(series: str, card: Card, jobs: list[OutputJob], separator: str) -> OutputJob:
@@ -170,6 +273,7 @@ def _merged_job(series: str, card: Card, jobs: list[OutputJob], separator: str) 
     last = jobs[-1]
     start = branch_number(first.slot_index, slot_count)
     end = branch_number(last.slot_index, slot_count)
+    title = merged_document_title(card)
     parts = tuple(
         OutputPart(
             stamp=job.stamp,
@@ -190,7 +294,7 @@ def _merged_job(series: str, card: Card, jobs: list[OutputJob], separator: str) 
             series,
             card.number,
             start,
-            first.title,
+            title,
             separator=separator,
             branch_end=end,
         ),
@@ -203,7 +307,7 @@ def _merged_job(series: str, card: Card, jobs: list[OutputJob], separator: str) 
         masks=card.masks,
         trims=card.trims,
         skews=card.skews,
-        title=first.title,
+        title=title,
         parts=parts,
     )
 
@@ -243,13 +347,14 @@ def _fallback_names(
     separator: str,
     merge_branches: bool,
 ) -> list[str]:
+    choice = file_merge_choice(series, card, separator, merge_branches)
+    if choice.filename:
+        return [choice.filename]
     slot_count = len(card.slots)
-    filled = []
     names = []
     for slot_index, count in enumerate(files_per_slot):
         if not count:
             continue
-        filled.append(slot_index)
         names.append(output_filename(
             series,
             card.number,
@@ -257,15 +362,6 @@ def _fallback_names(
             _slot_document_title(card.slots[slot_index]),
             separator=separator,
         ))
-    if merge_branches and len(filled) >= 2:
-        return [output_filename(
-            series,
-            card.number,
-            branch_number(filled[0], slot_count),
-            _slot_document_title(card.slots[filled[0]]),
-            separator=separator,
-            branch_end=branch_number(filled[-1], slot_count),
-        )]
     return names
 
 

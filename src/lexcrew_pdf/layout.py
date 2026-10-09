@@ -91,7 +91,7 @@ class Layout:
     grayscale: bool = False
     stamp: StampStyle = DEFAULT_STAMP
     filename_separator: str = DEFAULT_SEPARATOR
-    merge_branches: bool = False
+    merge_branches: bool = True
 
 
 def default_layout() -> Layout:
@@ -104,7 +104,7 @@ def default_layout() -> Layout:
         grayscale=False,
         stamp=DEFAULT_STAMP,
         filename_separator=DEFAULT_SEPARATOR,
-        merge_branches=False,
+        merge_branches=True,
     )
 
 
@@ -238,6 +238,11 @@ def parse_layout(raw: dict) -> Layout:
         filename_separator = DEFAULT_SEPARATOR
     if "mergeBranches" in raw and raw.get("mergeBranches") is not True and raw.get("mergeBranches") is not False:
         raise ValueError("配置ファイルを読めません。")
+    # キーが無い古い配置は、枝番をまとめて出す。明示した false だけ分ける。
+    if "mergeBranches" not in raw:
+        merge_branches = True
+    else:
+        merge_branches = raw.get("mergeBranches") is True
     return Layout(
         series=series,
         enabled_series=enabled_series,
@@ -247,7 +252,7 @@ def parse_layout(raw: dict) -> Layout:
         grayscale=raw.get("grayscale") is True,
         stamp=stamp,
         filename_separator=filename_separator,
-        merge_branches=raw.get("mergeBranches") is True,
+        merge_branches=merge_branches,
     )
 
 
@@ -313,8 +318,8 @@ def layout_to_json(layout: Layout) -> dict:
         payload["grayscale"] = True
     if layout.filename_separator != DEFAULT_SEPARATOR:
         payload["filenameSeparator"] = layout.filename_separator
-    if layout.merge_branches:
-        payload["mergeBranches"] = True
+    if not layout.merge_branches:
+        payload["mergeBranches"] = False
     record = stamp_record(layout.stamp)
     if record is not None:
         payload["stamp"] = record

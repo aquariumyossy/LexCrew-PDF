@@ -110,16 +110,28 @@ Copy-Item -LiteralPath (Join-Path $PSScriptRoot "LexCrew-PDF.bat") -Destination 
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "停止.bat") -Destination $dest
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "Shortcut.ps1") -Destination $dest
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "使い方.txt") -Destination $dest
+Copy-Item -LiteralPath (Join-Path $repo "LICENSE") -Destination (Join-Path $dest "LICENSE")
 
 $license = @"
-このフォルダの PyMuPDF $pymupdf は、GNU AGPL 3.0 または Artifex の商用ライセンスです。
+LexCrew-PDF
+Copyright (C) 2026 吉田秀平
+
+このプログラムは自由ソフトウェアです。GNU Affero General Public License バージョン 3 の条件で再配布、改変できます。
+ライセンスの全文は、このフォルダの LICENSE です。
+https://www.gnu.org/licenses/agpl-3.0.html
+
+保証はありません。商品性や特定目的への適合性についても保証しません。詳細は LICENSE を見てください。
+
+このフォルダの PyMuPDF $pymupdf は、GNU AGPL 3.0 の版です。改変していません。Artifex の商用ライセンスは含みません。
+ソースは https://github.com/pymupdf/PyMuPDF の $pymupdf です。
 原文は runtime\Lib\site-packages の中の PyMuPDF の dist-info にあります。
-ソースは https://github.com/pymupdf/PyMuPDF です。
 
-pywebview $pywebview は BSD ライセンスです。
+pywebview $pywebview は BSD 3-Clause License です。
+Copyright (c) 2014-2017, Roman Sirokov
 原文は runtime\Lib\site-packages の中の pywebview の dist-info にあります。
+ソースで再配布するときは、著作権表示、条件、免責を残します。バイナリで再配布するときは、同じ表記を同梱物に残します。著作権者の名前を、書面の許可なく宣伝に使いません。
 
-LexCrew-PDF の Python ソースは、このフォルダの src にあります。
+LexCrew-PDF のソースは、このフォルダの src と ui にあります。
 "@
 $utf8 = New-Object System.Text.UTF8Encoding $true
 [System.IO.File]::WriteAllText((Join-Path $dest "ライセンス.txt"), $license.Trim() + "`r`n", $utf8)

@@ -133,6 +133,10 @@ powershell -ExecutionPolicy Bypass -File packaging\build.ps1
 
 ## ライセンス
 
-このフォルダに同梱する PyMuPDF は、GNU AGPL 3.0 または Artifex の商用ライセンスです。pywebview は BSD ライセンスです。配布 zip の `ライセンス.txt` に、入っている版と原文の場所を書いています。
+LexCrew-PDF のソースと配布 zip は、GNU AGPL 3.0 で提供します。Copyright (C) 2026 吉田秀平。全文は [LICENSE](LICENSE) です。
 
-LexCrew-PDF の Python ソースは、このリポジトリの `src` にあります。
+同梱の PyMuPDF は GNU AGPL 3.0 です。この配布物では改変していません。ソースは [PyMuPDF](https://github.com/pymupdf/PyMuPDF) の、zip に入っている版です。Artifex の商用ライセンスは含みません。
+
+pywebview は BSD 3-Clause License です。Copyright (c) 2014-2017, Roman Sirokov。原文は配布 zip の pywebview の dist-info にあります。
+
+開発: 弁護士　吉田秀平

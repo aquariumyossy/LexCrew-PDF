@@ -7,11 +7,10 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .names import (
-    DEFAULT_SEPARATOR,
+    FIRST_NUMBER_MAX,
     INITIAL_SERIES,
     SERIES,
     canonical_template,
-    check_separator,
     check_series,
     filename_prefix,
 )
@@ -90,8 +89,8 @@ class Layout:
     label_template: str
     grayscale: bool = False
     stamp: StampStyle = DEFAULT_STAMP
-    filename_separator: str = DEFAULT_SEPARATOR
     merge_branches: bool = True
+    first_number: int = 1
 
 
 def default_layout() -> Layout:
@@ -103,8 +102,8 @@ def default_layout() -> Layout:
         label_template="甲第N号証",
         grayscale=False,
         stamp=DEFAULT_STAMP,
-        filename_separator=DEFAULT_SEPARATOR,
         merge_branches=True,
+        first_number=1,
     )
 
 
@@ -229,13 +228,6 @@ def parse_layout(raw: dict) -> Layout:
     last_written = tuple(_check_output_name(str(name)) for name in last)
     if "grayscale" in raw and raw.get("grayscale") is not True and raw.get("grayscale") is not False:
         raise ValueError("配置ファイルを読めません。")
-    if "filenameSeparator" in raw:
-        try:
-            filename_separator = check_separator(raw.get("filenameSeparator"))
-        except ValueError:
-            raise ValueError("配置ファイルを読めません。") from None
-    else:
-        filename_separator = DEFAULT_SEPARATOR
     if "mergeBranches" in raw and raw.get("mergeBranches") is not True and raw.get("mergeBranches") is not False:
         raise ValueError("配置ファイルを読めません。")
     # キーが無い古い配置は、枝番をまとめて出す。明示した false だけ分ける。
@@ -243,6 +235,9 @@ def parse_layout(raw: dict) -> Layout:
         merge_branches = True
     else:
         merge_branches = raw.get("mergeBranches") is True
+    first_number = raw.get("firstNumber", 1)
+    if isinstance(first_number, bool) or not isinstance(first_number, int) or not 1 <= first_number <= FIRST_NUMBER_MAX:
+        raise ValueError("配置ファイルを読めません。")
     return Layout(
         series=series,
         enabled_series=enabled_series,
@@ -251,8 +246,8 @@ def parse_layout(raw: dict) -> Layout:
         label_template=label_template,
         grayscale=raw.get("grayscale") is True,
         stamp=stamp,
-        filename_separator=filename_separator,
         merge_branches=merge_branches,
+        first_number=first_number,
     )
 
 
@@ -316,10 +311,10 @@ def layout_to_json(layout: Layout) -> dict:
     }
     if layout.grayscale:
         payload["grayscale"] = True
-    if layout.filename_separator != DEFAULT_SEPARATOR:
-        payload["filenameSeparator"] = layout.filename_separator
     if not layout.merge_branches:
         payload["mergeBranches"] = False
+    if layout.first_number != 1:
+        payload["firstNumber"] = layout.first_number
     record = stamp_record(layout.stamp)
     if record is not None:
         payload["stamp"] = record

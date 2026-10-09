@@ -7,14 +7,11 @@ from pathlib import Path
 SERIES = ("甲", "乙", "丙", "丁", "戊")
 INITIAL_SERIES = ("甲", "乙", "丙")
 
-SEPARATOR_SPACE = " "
-SEPARATOR_COLON = "："
-DEFAULT_SEPARATOR = SEPARATOR_SPACE
-_SEPARATORS = (SEPARATOR_SPACE, SEPARATOR_COLON)
 _ILLEGAL_FILENAME = set('\\/:*?"<>|')
 # mints の提出マニュアル。拡張子を含めたファイル名の上限。
 MAX_FILENAME_CHARS = 100
 _FULLWIDTH_DIGITS = str.maketrans("0123456789", "０１２３４５６７８９")
+FIRST_NUMBER_MAX = 9999
 _LATIN_LETTER = r"[A-Za-z\uff21-\uff3a\uff41-\uff5a]"
 _KO_TEMPLATE = re.compile(rf"^([甲乙丙丁戊])({_LATIN_LETTER})?第N号証$")
 _SO_TEMPLATE = re.compile(rf"^疎([甲乙丙])({_LATIN_LETTER})?第N号証$")
@@ -36,17 +33,28 @@ def fullwidth_digits(number: int) -> str:
     return str(number).translate(_FULLWIDTH_DIGITS)
 
 
+def shown_number(first_number: int, ordinal: int) -> int:
+    """並びの1からの番号を、開始番号からの証拠番号にする。"""
+    return first_number + ordinal - 1
+
+
+def require_first_number(value) -> int:
+    """画面から来た開始番号。7.0 は 7 にし、7.5 や真偽値は拒む。"""
+    if isinstance(value, bool):
+        raise ValueError("開始番号は1から9999までの整数です。")
+    if isinstance(value, float):
+        if not value.is_integer():
+            raise ValueError("開始番号は1から9999までの整数です。")
+        value = int(value)
+    if isinstance(value, int) and 1 <= value <= FIRST_NUMBER_MAX:
+        return value
+    raise ValueError("開始番号は1から9999までの整数です。")
+
+
 def check_series(series: str) -> str:
     if series not in SERIES:
         raise ValueError(f"証拠の種類を読めません: {series}")
     return series
-
-
-def check_separator(value: str) -> str:
-    """ファイル名の区切り。半角スペースか、これまでの全角コロン。"""
-    if not isinstance(value, str) or value not in _SEPARATORS:
-        raise ValueError("ファイル名の区切りは半角スペースか全角コロンです。")
-    return value
 
 
 def canonical_template(value: str) -> str:
@@ -112,6 +120,13 @@ def stamp_label(series: str, number: int, branch: int | None) -> str:
     return label
 
 
+def exhibit_number(series: str, number: int, branch: int | None) -> str:
+    """ファイル名の号証番号。甲001、甲001-1、乙A001。印の文言や範囲は含めない。"""
+    if number < 1:
+        raise ValueError("証拠番号が不正です。")
+    return filename_prefix(series) + _number_token(number, branch, None)
+
+
 def document_title(typed: str, first_file: str | None) -> str:
     """保存した書名。空なら、その枝番の先頭 PDF から拡張子を除く。
 
@@ -155,23 +170,21 @@ def output_filename(
     branch: int | None,
     title: str,
     *,
-    separator: str | None = None,
     branch_end: int | None = None,
 ) -> str:
     """ファイル名の番号は半角3桁。枝番は半角ハイフン。範囲は 1~3。
 
-    区切りの初期値は半角スペース。全角コロンも選べる。
+    番号と書名のあいだは半角スペース。
     `.pdf` を含めて 100 文字に収まるよう、書名の後ろを切る。
     """
     if number < 1:
         raise ValueError("証拠番号が不正です。")
-    sep = DEFAULT_SEPARATOR if separator is None else check_separator(separator)
     prefix = filename_prefix(series)
     head = prefix + _number_token(number, branch, branch_end)
     suffix = ".pdf"
-    budget = MAX_FILENAME_CHARS - len(head) - len(sep) - len(suffix)
+    budget = MAX_FILENAME_CHARS - len(head) - 1 - len(suffix)
     safe = _fit_filename_title(title, budget)
-    return f"{head}{sep}{safe}{suffix}"
+    return f"{head} {safe}{suffix}"
 
 
 def sanitize_filename_title(title: str) -> str:

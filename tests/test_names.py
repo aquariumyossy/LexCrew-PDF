@@ -4,7 +4,10 @@ import pytest
 from lexcrew_pdf.names import (
     MAX_FILENAME_CHARS,
     document_title,
+    exhibit_number,
     filename_prefix,
+    require_first_number,
+    shown_number,
     output_filename,
     sanitize_filename_title,
     stamp_label,
@@ -20,12 +23,9 @@ def test_filename_drops_windows_illegal_characters_and_keeps_the_fullwidth_colon
     assert ":" not in filename
 
 
-def test_space_is_the_default_separator_and_the_colon_remains_available():
+def test_number_and_title_are_joined_by_a_space():
     assert output_filename("甲", 1, None, "売買契約書") == "甲001 売買契約書.pdf"
-    assert output_filename("甲", 1, None, "売買契約書", separator="：") == "甲001：売買契約書.pdf"
-    assert output_filename("甲", 4, 2, "更新契約書", separator="：") == "甲004-2：更新契約書.pdf"
-    with pytest.raises(ValueError):
-        output_filename("甲", 1, None, "書名", separator=":")
+    assert output_filename("甲", 4, 2, "更新契約書") == "甲004-2 更新契約書.pdf"
 
 
 def test_otsu_number_twelve_has_fullwidth_stamp_digits():
@@ -79,7 +79,6 @@ def test_preset_templates_keep_their_filename_heading():
     assert output_filename("疎丙第N号証", 3, 1, "書") == "疎丙003-1 書.pdf"
     assert output_filename("別紙N", 1, None, "書") == "別紙001 書.pdf"
     assert output_filename("資料N", 1, None, "契約書") == "資料001 契約書.pdf"
-    assert output_filename("丙第N号証", 1, None, "書", separator="：") == "丙001：書.pdf"
     assert stamp_label("疎甲第N号証", 1, 1) == "疎甲第１号証の１"
     assert stamp_label("別紙N", 2, None) == "別紙２"
     assert stamp_label("資料N", 1, None) == "資料１"
@@ -98,12 +97,16 @@ def test_party_letter_is_kept_in_the_filename_prefix():
     assert output_filename("乙A第N号証", 1, 1, "準備書面", branch_end=3) == "乙A001-1~3 準備書面.pdf"
     assert stamp_label("乙A第N号証", 1, 1) == "乙A第１号証の１"
     assert stamp_label("丙Ｃ第N号証", 1, None) == "丙Ｃ第１号証"
+    assert exhibit_number("甲第N号証", 1, None) == "甲001"
+    assert exhibit_number("甲", 1, 1) == "甲001-1"
+    assert exhibit_number("乙A第N号証", 1, None) == "乙A001"
+    assert exhibit_number("乙A第N号証", 2, 3) == "乙A002-3"
+    assert exhibit_number("丙Ｃ第N号証", 3, None) == "丙C003"
     assert not output_filename("乙A第N号証", 1, None, "書").startswith("乙A第")
 
 
 def test_branch_range_uses_a_tilde_between_the_first_and_last():
     assert output_filename("甲", 1, 1, "売買契約書", branch_end=3) == "甲001-1~3 売買契約書.pdf"
-    assert output_filename("甲", 1, 1, "売買契約書", separator="：", branch_end=3) == "甲001-1~3：売買契約書.pdf"
     assert output_filename("甲", 1, 2, "書", branch_end=2) == "甲001-2 書.pdf"
     with pytest.raises(ValueError):
         output_filename("甲", 1, None, "書", branch_end=3)
@@ -114,6 +117,21 @@ def test_branch_range_uses_a_tilde_between_the_first_and_last():
 def test_template_without_n_is_rejected():
     with pytest.raises(ValueError):
         stamp_label("資料", 1, None)
+
+
+def test_shown_number_counts_from_the_first_number():
+    assert shown_number(1, 1) == 1
+    assert shown_number(7, 1) == 7
+    assert shown_number(7, 6) == 12
+    assert require_first_number(7.0) == 7
+    with pytest.raises(ValueError, match="開始番号は1から9999までの整数です。"):
+        require_first_number(0)
+    with pytest.raises(ValueError, match="開始番号は1から9999までの整数です。"):
+        require_first_number(7.5)
+    with pytest.raises(ValueError, match="開始番号は1から9999までの整数です。"):
+        require_first_number(10000)
+    with pytest.raises(ValueError, match="開始番号は1から9999までの整数です。"):
+        require_first_number(True)
 
 
 def test_unknown_series_is_rejected():

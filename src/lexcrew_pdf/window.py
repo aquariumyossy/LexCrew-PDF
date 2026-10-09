@@ -210,14 +210,13 @@ class Api:
         self._notify_editor("window.reloadAppearance()")
         return view
 
-    def set_filename_separator(self, separator: str) -> dict:
-        return self._run(lambda: self.session.set_filename_separator(separator))
+    def set_first_number(self, number: int) -> dict:
+        view = self._run(lambda: self.session.set_first_number(number))
+        self._notify_editor("window.invalidatePreview()")
+        return view
 
     def set_merge_branches(self, enabled: bool) -> dict:
         return self._run(lambda: self.session.set_merge_branches(bool(enabled)))
-
-    def evidence_list(self) -> dict:
-        return self._run(self.session.evidence_list)
 
     def set_stamp_style(self, color, size, font) -> dict:
         from .stamp import StampFontMissing

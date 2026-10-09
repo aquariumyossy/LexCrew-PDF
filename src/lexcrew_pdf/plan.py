@@ -9,8 +9,10 @@ from .names import (
     branch_number,
     display_label,
     document_title,
+    exhibit_number,
     filename_stem_token,
     output_filename,
+    shown_number,
     stamp_label,
 )
 from .pages import GROUP_PRIMARY, resolve_buckets
@@ -22,6 +24,7 @@ class OutputPart:
     """合体した PDF の、一つの枝番。先頭ページだけに、この印を押す。"""
 
     stamp: str
+    exhibit: str
     title: str
     pages: tuple[tuple[int, int, int], ...]
     rotation: int
@@ -46,6 +49,7 @@ class OutputJob:
     trims: tuple = ()
     skews: tuple = ()
     title: str = ""
+    exhibit: str = ""
     parts: tuple[OutputPart, ...] = ()
 
 
@@ -77,8 +81,8 @@ def jobs_from_layout(layout: Layout, folder: Path) -> PlanBuild:
             layout.label_template,
             card,
             folder,
-            separator=layout.filename_separator,
             merge_branches=layout.merge_branches,
+            shown=shown_number(layout.first_number, card.number),
         )
         jobs.extend(built)
         errors.extend(card_errors)
@@ -105,6 +109,7 @@ def slot_job(jobs, number: int, slot_index: int) -> OutputJob | None:
                     return replace(
                         job,
                         stamp=part.stamp,
+                        exhibit=part.exhibit,
                         rotation=part.rotation,
                         pages=part.pages,
                         slot_index=part.slot_index,
@@ -119,23 +124,13 @@ def slot_job(jobs, number: int, slot_index: int) -> OutputJob | None:
     return None
 
 
-def evidence_tsv(jobs) -> str:
-    """号証と書名。タブ区切りで、出力する枝番ごとに1行。"""
-    rows = []
-    for job in jobs:
-        chunks = job.parts if job.parts else (job,)
-        for chunk in chunks:
-            rows.append(f"{_tsv_cell(chunk.stamp)}\t{_tsv_cell(chunk.title)}")
-    return "\n".join(rows)
-
-
 def _jobs_for_card(
     series: str,
     card: Card,
     folder: Path,
     *,
-    separator: str,
     merge_branches: bool,
+    shown: int,
 ) -> tuple[list[OutputJob], list[dict], list[str], list[dict]]:
     flat = _flat_files(card)
     if not flat:
@@ -143,14 +138,17 @@ def _jobs_for_card(
     resolved = tuple(str(resolve_stored_path(folder, stored)) for stored in flat)
     files_per_slot = [len(slot.files) for slot in card.slots]
     try:
-        _raw, _expanded, _splittable, natural = inspect_source_pages(resolved, split=card.split_a4)
+        tilts = [slot.rotation for slot in card.slots for _stored in slot.files]
+        _raw, _expanded, _splittable, natural, _spreads = inspect_source_pages(
+            resolved, split=card.split_a4, tilts=tilts,
+        )
     except Exception as exc:
         return [], [_card_error(card, f"原本を開けません。{exc}")], _fallback_names(
-            series, card, files_per_slot, separator=separator, merge_branches=merge_branches,
+            series, card, files_per_slot, merge_branches=merge_branches, shown=shown,
         ), []
     if not natural:
         return [], [_card_error(card, "ページがありません。")], _fallback_names(
-            series, card, files_per_slot, separator=separator, merge_branches=merge_branches,
+            series, card, files_per_slot, merge_branches=merge_branches, shown=shown,
         ), []
     rows = _page_rows(card.pages)
     buckets = resolve_buckets(list(natural), rows, files_per_slot)
@@ -170,8 +168,9 @@ def _jobs_for_card(
         jobs.append(OutputJob(
             number=card.number,
             sources=resolved,
-            stamp=stamp_label(series, card.number, branch),
-            filename=output_filename(series, card.number, branch, title, separator=separator),
+            stamp=stamp_label(series, shown, branch),
+            exhibit=exhibit_number(series, shown, branch),
+            filename=output_filename(series, shown, branch, title),
             rotation=slot.rotation,
             split_a4=card.split_a4,
             pages=pages,
@@ -188,16 +187,16 @@ def _jobs_for_card(
     if merge_branches and len(jobs) >= 2 and all(job.pages is not None for job in jobs):
         indexes = [job.slot_index for job in jobs]
         if indexes == list(range(indexes[0], indexes[-1] + 1)):
-            return [_merged_job(series, card, jobs, separator)], [], [], []
+            return [_merged_job(series, card, jobs, shown)], [], [], []
         missing = [index for index in range(indexes[0], indexes[-1] + 1) if index not in indexes]
         return jobs, [], [], [{
             "number": card.number,
-            "message": branch_gap_warning(series, card, missing),
+            "message": branch_gap_warning(series, card, missing, shown),
         }]
     return jobs, [], [], []
 
 
-def file_merge_choice(series: str, card: Card, separator: str, merge_branches: bool) -> MergeChoice:
+def file_merge_choice(series: str, card: Card, merge_branches: bool, shown: int) -> MergeChoice:
     """ファイルのある枝番だけで合体を決める。原本は開かない。"""
     if not merge_branches or len(card.slots) < 2:
         return MergeChoice()
@@ -207,16 +206,14 @@ def file_merge_choice(series: str, card: Card, separator: str, merge_branches: b
     expected = list(range(filled[0], filled[-1] + 1))
     if filled != expected:
         missing = [index for index in expected if index not in set(filled)]
-        return MergeChoice(warning=branch_gap_warning(series, card, missing))
+        return MergeChoice(warning=branch_gap_warning(series, card, missing, shown))
     slot_count = len(card.slots)
     start = branch_number(filled[0], slot_count)
     end = branch_number(filled[-1], slot_count)
     title = merged_document_title(card)
     return MergeChoice(
-        filename=output_filename(
-            series, card.number, start, title, separator=separator, branch_end=end,
-        ),
-        token=filename_stem_token(series, card.number, start, end),
+        filename=output_filename(series, shown, start, title, branch_end=end),
+        token=filename_stem_token(series, shown, start, end),
         included=tuple(filled),
     )
 
@@ -234,13 +231,13 @@ def merged_document_title(card: Card) -> str:
     return ""
 
 
-def branch_gap_warning(series: str, card: Card, missing: list[int]) -> str:
+def branch_gap_warning(series: str, card: Card, missing: list[int], shown: int) -> str:
     """番号が飛ぶのでまとめない、という案内。印の番号は付け替えない。"""
     slot_count = len(card.slots)
     empty = []
     excluded = []
     for index in missing:
-        label = display_label(series, card.number, index, slot_count)
+        label = display_label(series, shown, index, slot_count)
         if card.slots[index].files:
             excluded.append(label)
         else:
@@ -266,7 +263,7 @@ def _and_join(labels: list[str]) -> str:
     return "、".join(labels[:-1]) + "と" + labels[-1]
 
 
-def _merged_job(series: str, card: Card, jobs: list[OutputJob], separator: str) -> OutputJob:
+def _merged_job(series: str, card: Card, jobs: list[OutputJob], shown: int) -> OutputJob:
     """同じ号証の枝番を、1つの PDF にする。印は各枝番の先頭ページ。"""
     slot_count = len(card.slots)
     first = jobs[0]
@@ -277,6 +274,7 @@ def _merged_job(series: str, card: Card, jobs: list[OutputJob], separator: str) 
     parts = tuple(
         OutputPart(
             stamp=job.stamp,
+            exhibit=job.exhibit,
             title=job.title,
             pages=job.pages,
             rotation=job.rotation,
@@ -290,14 +288,8 @@ def _merged_job(series: str, card: Card, jobs: list[OutputJob], separator: str) 
         number=card.number,
         sources=first.sources,
         stamp=first.stamp,
-        filename=output_filename(
-            series,
-            card.number,
-            start,
-            title,
-            separator=separator,
-            branch_end=end,
-        ),
+        exhibit=first.exhibit,
+        filename=output_filename(series, shown, start, title, branch_end=end),
         rotation=first.rotation,
         split_a4=card.split_a4,
         pages=None,
@@ -344,10 +336,10 @@ def _fallback_names(
     card: Card,
     files_per_slot: list[int],
     *,
-    separator: str,
     merge_branches: bool,
+    shown: int,
 ) -> list[str]:
-    choice = file_merge_choice(series, card, separator, merge_branches)
+    choice = file_merge_choice(series, card, merge_branches, shown)
     if choice.filename:
         return [choice.filename]
     slot_count = len(card.slots)
@@ -357,18 +349,12 @@ def _fallback_names(
             continue
         names.append(output_filename(
             series,
-            card.number,
+            shown,
             branch_number(slot_index, slot_count),
             _slot_document_title(card.slots[slot_index]),
-            separator=separator,
         ))
     return names
 
 
 def _card_error(card: Card, message: str) -> dict:
-    titled = next((slot for slot in card.slots if slot.title.strip() or slot.files), card.slots[0])
-    return {"number": card.number, "title": _slot_document_title(titled), "message": message}
-
-
-def _tsv_cell(value: str) -> str:
-    return (value or "").replace("\t", " ").replace("\r", " ").replace("\n", " ")
+    return {"number": card.number, "message": message}

@@ -292,6 +292,54 @@ def test_replace_clears_pages_and_add_keeps_them(tmp_path):
     assert session.layout.cards[0].pages is None
 
 
+def test_turning_a4_changes_whether_split_is_offered(tmp_path):
+    _require_font()
+    wide = tmp_path / "wide.pdf"
+    tall = tmp_path / "tall.pdf"
+    wide_doc = fitz.open()
+    wide_doc.new_page(width=842, height=595)
+    wide_doc.save(wide)
+    wide_doc.close()
+    tall_doc = fitz.open()
+    page = tall_doc.new_page(width=595, height=842)
+    page.insert_text((72, 80), "TOPWORD")
+    page.insert_text((72, 780), "BOTTOMWORD")
+    tall_doc.save(tall)
+    tall_doc.close()
+    session = Session(tmp_path)
+    session.add_file(1, 0, str(wide))
+    assert session.media(1)["splittable"] is True
+    session.rotate(1, 0)
+    hidden = session.media(1)
+    assert hidden["splittable"] is False
+    assert hidden["slots"][0]["splittable"] is False
+    session.set_split(1, True)
+    session.generate()
+    turned = fitz.open(tmp_path / "LexCrew-PDF-Downloads" / "甲001 wide.pdf")
+    try:
+        assert turned.page_count == 1
+    finally:
+        turned.close()
+
+    session.add_file(2, 0, str(tall))
+    assert session.media(2)["splittable"] is False
+    session.rotate(2, 0)
+    shown = session.media(2)
+    assert shown["splittable"] is True
+    assert shown["slots"][0]["splittable"] is True
+    session.set_split(2, True)
+    session.generate()
+    halves = fitz.open(tmp_path / "LexCrew-PDF-Downloads" / "甲002 tall.pdf")
+    try:
+        assert halves.page_count == 2
+        assert "BOTTOMWORD" in halves[0].get_text("text")
+        assert "TOPWORD" not in halves[0].get_text("text")
+        assert "TOPWORD" in halves[1].get_text("text")
+        assert "BOTTOMWORD" not in halves[1].get_text("text")
+    finally:
+        halves.close()
+
+
 def test_rotated_landscape_a4_is_splittable_and_generate_doubles_pages(tmp_path):
     _require_font()
     source = tmp_path / "spread.pdf"

@@ -250,8 +250,8 @@ def count_pdf_pages(paths: tuple[str, ...] | list[str]) -> int:
     return total
 
 
-# A3 は 297mm × 420mm。短い辺が A4 の長い辺、長い辺が A4 の短い辺の2枚分。
-# A4 横は 210mm × 297mm。左右に割ると、各半分が A4 縦の比になる。
+# A3 は 297mm × 420mm。A4 は 210mm × 297mm。
+# 見えている画像が、このどちらかの横長のときだけ左右に割る。
 _A3_SHORT_PT = 841.89
 _A3_LONG_PT = 1190.55
 _A4_SHORT_PT = 595.28
@@ -267,48 +267,66 @@ def viewer_rotate(tilt_clockwise: int = 0) -> int:
     return (-tilt) % 360
 
 
-def a3_split_axis(rect) -> str | None:
-    """閲覧時の用紙を分ける方向。A3 は向きに従う。A4 横は左→右。縦の A4 はそのまま。"""
-    width = float(rect.width)
-    height = float(rect.height)
-    long_side = max(width, height)
-    short_side = min(width, height)
-    if _near_side(long_side, _A3_LONG_PT) and _near_side(short_side, _A3_SHORT_PT):
-        if width >= height:
-            return "horizontal"
-        return "vertical"
-    if width >= height and _near_side(long_side, _A4_LONG_PT) and _near_side(short_side, _A4_SHORT_PT):
-        return "horizontal"
-    return None
-
-
 def _near_side(side: float, target: float) -> bool:
     return abs(side - target) <= target * _A3_TOLERANCE
 
 
-def a4_clips(rect, *, split: bool) -> list[fitz.Rect | None]:
-    """分割するときは左→右、または上→下。縦の A4 は切らない。"""
+def _viewed_size(rect, tilt: int) -> tuple[float, float]:
+    """右回りの90度単位を足した、見えている幅と高さ。"""
+    width = float(rect.width)
+    height = float(rect.height)
+    if int(tilt or 0) % 360 in (90, 270):
+        return height, width
+    return width, height
+
+
+def _landscape_sheet(width: float, height: float) -> bool:
+    """横長の A3 か A4 か。縦の画像は割らない。"""
+    if width < height:
+        return False
+    long_side, short_side = width, height
+    a3 = _near_side(long_side, _A3_LONG_PT) and _near_side(short_side, _A3_SHORT_PT)
+    a4 = _near_side(long_side, _A4_LONG_PT) and _near_side(short_side, _A4_SHORT_PT)
+    return a3 or a4
+
+
+def _viewed_halves(rect, tilt: int) -> list[fitz.Rect] | None:
+    """見ている左半分、右半分を、原本の矩形で返す。
+
+    右へ90度では、見ている左が原本の下、右が原本の上になる。
+    """
+    turn = int(tilt or 0) % 360
+    width, height = _viewed_size(rect, turn)
+    if not _landscape_sheet(width, height):
+        return None
+    if turn in (0, 180):
+        mid = (rect.x0 + rect.x1) / 2
+        left = fitz.Rect(rect.x0, rect.y0, mid, rect.y1)
+        right = fitz.Rect(mid, rect.y0, rect.x1, rect.y1)
+        if turn == 180:
+            return [right, left]
+        return [left, right]
+    mid = (rect.y0 + rect.y1) / 2
+    top = fitz.Rect(rect.x0, rect.y0, rect.x1, mid)
+    bottom = fitz.Rect(rect.x0, mid, rect.x1, rect.y1)
+    if turn == 90:
+        return [bottom, top]
+    return [top, bottom]
+
+
+def a4_clips(rect, *, split: bool, tilt: int = 0) -> list[fitz.Rect | None]:
+    """見えている横長の A3 か A4 を、左から右へ切る。それ以外は切らない。"""
     if not split:
         return [None]
-    axis = a3_split_axis(rect)
-    if axis == "horizontal":
-        mid = (rect.x0 + rect.x1) / 2
-        return [
-            fitz.Rect(rect.x0, rect.y0, mid, rect.y1),
-            fitz.Rect(mid, rect.y0, rect.x1, rect.y1),
-        ]
-    if axis == "vertical":
-        mid = (rect.y0 + rect.y1) / 2
-        return [
-            fitz.Rect(rect.x0, rect.y0, rect.x1, mid),
-            fitz.Rect(rect.x0, mid, rect.x1, rect.y1),
-        ]
-    return [None]
+    halves = _viewed_halves(rect, tilt)
+    if halves is None:
+        return [None]
+    return halves
 
 
 def describe_source_pages(paths: tuple[str, ...] | list[str]) -> tuple[int, int, bool]:
-    """原本のページ数、A4分割したときのページ数、分割できるページが1枚でもあるか。"""
-    raw, expanded, splittable, _refs = inspect_source_pages(paths, split=False)
+    """原本のページ数、分割したときのページ数、分割できるページが1枚でもあるか。"""
+    raw, expanded, splittable, _refs, _spreads = inspect_source_pages(paths, split=False)
     return raw, expanded, splittable
 
 
@@ -316,22 +334,31 @@ def inspect_source_pages(
     paths: tuple[str, ...] | list[str],
     *,
     split: bool,
-) -> tuple[int, int, bool, list[tuple[int, int, int]]]:
-    """原本を開き、分割の有無に合わせた (原本, ページ, 部分) の並びを返す。"""
+    tilts: list[int] | tuple[int, ...] | None = None,
+) -> tuple[int, int, bool, list[tuple[int, int, int]], tuple[bool, ...]]:
+    """原本を開き、分割の有無に合わせた (原本, ページ, 部分) の並びを返す。
+
+    tilts は原本ごとの右回り角度。見えている画像が横長の A3 か A4 のページだけ割る。
+    戻り値の最後は、原本ごとに分割できるページがあるか。
+    """
     raw = 0
     expanded = 0
     splittable = False
     refs: list[tuple[int, int, int]] = []
+    spreads: list[bool] = []
     for source_index, path in enumerate(paths):
+        tilt = 0 if tilts is None or source_index >= len(tilts) else int(tilts[source_index] or 0)
         document = open_source(path)
+        file_spread = False
         try:
             for page_index in range(document.page_count):
                 page = document[page_index]
                 _bake_display_rotation(page)
-                pieces = a4_clips(page.rect, split=True)
+                pieces = a4_clips(page.rect, split=True, tilt=tilt)
                 raw += 1
                 if len(pieces) > 1:
                     splittable = True
+                    file_spread = True
                 expanded += len(pieces)
                 if split and len(pieces) > 1:
                     refs.append((source_index, page_index, 1))
@@ -340,7 +367,8 @@ def inspect_source_pages(
                     refs.append((source_index, page_index, 0))
         finally:
             document.close()
-    return raw, expanded, splittable, refs
+        spreads.append(file_spread)
+    return raw, expanded, splittable, refs, tuple(spreads)
 
 
 class _PageFound(Exception):
@@ -405,7 +433,7 @@ def stamp_sources_to_pdf(
                     _draw_stamp(page, run_label, font_path, box_w, box_h, run_dx, run_dy, chosen)
                 placed += 1
 
-            _for_each_placement(source_paths, split, run_pages, place)
+            _for_each_placement(source_paths, split, run_pages, place, run_tilt)
 
         if parts:
             for run in parts:
@@ -467,7 +495,7 @@ def render_stamped_page_jpeg(
             raise _PageFound
 
         try:
-            _for_each_placement(source_paths, split, pages, place)
+            _for_each_placement(source_paths, split, pages, place, tilt)
         except _PageFound:
             pass
         else:
@@ -500,7 +528,7 @@ def render_piece_jpeg(
         if page_index < 0 or page_index >= source.page_count:
             raise IndexError("ページがありません。")
         _bake_display_rotation(source[page_index])
-        clip = _clip_for_part(source[page_index].rect, part)
+        clip = _clip_for_part(source[page_index].rect, part, tilt)
         skew_tenths = _skew_for(skews, source_index, page_index)
         page, limit = _place_page(
             output, source, page_index, tilt, clip, grayscale=grayscale,
@@ -518,7 +546,7 @@ def render_piece_jpeg(
         output.close()
 
 
-def _for_each_placement(source_paths, split: bool, pages, visitor) -> None:
+def _for_each_placement(source_paths, split: bool, pages, visitor, tilt: int = 0) -> None:
     if pages is None:
         for source_index, path in enumerate(source_paths):
             source = open_source(path)
@@ -527,7 +555,7 @@ def _for_each_placement(source_paths, split: bool, pages, visitor) -> None:
                     raise ValueError("ページがありません。")
                 for index in range(source.page_count):
                     _bake_display_rotation(source[index])
-                    for part, clip in _indexed_clips(source[index].rect, split=split):
+                    for part, clip in _indexed_clips(source[index].rect, split=split, tilt=tilt):
                         visitor(source, source_index, index, clip, part)
             finally:
                 source.close()
@@ -551,7 +579,7 @@ def _for_each_placement(source_paths, split: bool, pages, visitor) -> None:
                 source,
                 source_index,
                 page_index,
-                _clip_for_part(source[page_index].rect, part),
+                _clip_for_part(source[page_index].rect, part, tilt),
                 part,
             )
     finally:
@@ -559,17 +587,17 @@ def _for_each_placement(source_paths, split: bool, pages, visitor) -> None:
             source.close()
 
 
-def _indexed_clips(rect, *, split: bool) -> list[tuple[int, fitz.Rect | None]]:
-    clips = a4_clips(rect, split=split)
+def _indexed_clips(rect, *, split: bool, tilt: int = 0) -> list[tuple[int, fitz.Rect | None]]:
+    clips = a4_clips(rect, split=split, tilt=tilt)
     if split and len(clips) > 1:
         return [(1, clips[0]), (2, clips[1])]
     return [(0, clips[0])]
 
 
-def _clip_for_part(rect, part: int):
+def _clip_for_part(rect, part: int, tilt: int = 0):
     if int(part) == 0:
         return None
-    clips = a4_clips(rect, split=True)
+    clips = a4_clips(rect, split=True, tilt=tilt)
     if len(clips) < 2:
         return None
     if int(part) == 1:
@@ -586,7 +614,7 @@ def source_mask_from_output(
 ) -> tuple[float, float, float, float] | None:
     """出力A4の矩形を、表示回転を焼いた原本ページの矩形にする。余白だけなら None。"""
     _bake_display_rotation(source_page)
-    clip = _clip_for_part(source_page.rect, part)
+    clip = _clip_for_part(source_page.rect, part, tilt)
     dest = fitz.open()
     try:
         page = dest.new_page(width=_a4().width, height=_a4().height)
@@ -619,7 +647,7 @@ def output_mask_from_source(
 ):
     """原本ページの矩形を、今の回転と分割で出力A4へ投影する。その面に出ないときは None。"""
     _bake_display_rotation(source_page)
-    clip = _clip_for_part(source_page.rect, part)
+    clip = _clip_for_part(source_page.rect, part, tilt)
     dest = fitz.open()
     try:
         page = dest.new_page(width=_a4().width, height=_a4().height)
@@ -884,7 +912,7 @@ def image_box_fractions(clip_width: float, clip_height: float, tilt: int) -> dic
 def image_box_for_piece(page, part: int, tilt: int) -> dict[str, float]:
     """編集画面のバーを置く枠。表示回転はメモリ上のページへ焼く。"""
     _bake_display_rotation(page)
-    clip = _clip_for_part(page.rect, part)
+    clip = _clip_for_part(page.rect, part, tilt)
     shown = page.rect if clip is None else fitz.Rect(clip)
     return image_box_fractions(float(shown.width), float(shown.height), tilt)
 

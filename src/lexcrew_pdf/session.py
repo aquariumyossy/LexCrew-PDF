@@ -10,7 +10,14 @@ from ctypes import wintypes
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from .names import branch_number, check_separator, display_label, document_title, output_filename
+from .names import (
+    branch_number,
+    display_label,
+    document_title,
+    output_filename,
+    require_first_number,
+    shown_number,
+)
 from .layout import (
     OUTPUT_DIR_NAME,
     Card,
@@ -131,8 +138,8 @@ class Session:
             "series": self.layout.series,
             "labelTemplate": self.layout.label_template,
             "grayscale": self.layout.grayscale,
-            "filenameSeparator": self.layout.filename_separator,
             "mergeBranches": self.layout.merge_branches,
+            "firstNumber": self.layout.first_number,
             "stamp": _stamp_view(self.layout.stamp),
             "enabledSeries": list(self.layout.enabled_series),
             "canAddSeries": len(self.layout.enabled_series) < 5,
@@ -177,7 +184,7 @@ class Session:
         return {
             "number": editing.number,
             "slot": editing.slot_index,
-            "label": display_label(self.layout.label_template, card.number, editing.slot_index, len(card.slots)),
+            "label": display_label(self.layout.label_template, self._shown(card.number), editing.slot_index, len(card.slots)),
             "rotation": slot.rotation,
             "split": card.split_a4,
             "pageWidth": width,
@@ -299,20 +306,20 @@ class Session:
         return self.view()
 
     @_locked
-    def set_filename_separator(self, separator: str) -> dict:
-        chosen = check_separator(separator)
-        if chosen == self.layout.filename_separator:
-            return self.view()
-        self.layout = replace(self.layout, filename_separator=chosen)
-        self._persist()
-        return self.view()
-
-    @_locked
     def set_merge_branches(self, enabled: bool) -> dict:
         chosen = enabled is True
         if chosen == self.layout.merge_branches:
             return self.view()
         self.layout = replace(self.layout, merge_branches=chosen)
+        self._persist()
+        return self.view()
+
+    @_locked
+    def set_first_number(self, number: int) -> dict:
+        first = require_first_number(number)
+        if first == self.layout.first_number:
+            return self.view()
+        self.layout = replace(self.layout, first_number=first)
         self._persist()
         return self.view()
 
@@ -745,7 +752,8 @@ class Session:
             card = self._card(int(number))
             paths = self._paths(card)
             counts = [len(slot.files) for slot in card.slots]
-            evidence_number = card.number
+            ordinal = card.number
+            shown = shown_number(self.layout.first_number, ordinal)
             split = card.split_a4
             rotations = [slot.rotation for slot in card.slots]
             offsets = [(slot.stamp_dx, slot.stamp_dy) for slot in card.slots]
@@ -760,8 +768,11 @@ class Session:
         skew_map = skew_lookup(skews)
         empty_slots = [{"index": index, "pageCount": 0, "thumb": ""} for index in range(len(counts))]
         if not paths:
-            return {"number": evidence_number, "pageCount": 0, "splittable": False, "thumb": "", "slots": empty_slots}
-        _raw, _expanded, splittable, natural = inspect_source_pages(paths, split=split)
+            return {"number": ordinal, "pageCount": 0, "splittable": False, "thumb": "", "slots": empty_slots}
+        tilts = [rotation for rotation, count in zip(rotations, counts) for _file in range(count)]
+        _raw, _expanded, splittable, natural, spreads = inspect_source_pages(
+            paths, split=split, tilts=tilts,
+        )
         buckets = resolve_buckets(list(natural), page_rows, counts)
         slots = []
         cursor = 0
@@ -775,7 +786,7 @@ class Session:
                 stamp_dx, stamp_dy = offsets[index]
                 jpeg = render_stamped_page_jpeg(
                     paths,
-                    stamp_label(template, evidence_number, branch_number(index, len(counts))),
+                    stamp_label(template, shown, branch_number(index, len(counts))),
                     0,
                     zoom=0.48,
                     tilt=rotations[index],
@@ -799,10 +810,15 @@ class Session:
                 thumb = base64.b64encode(jpeg).decode("ascii")
             if thumb and not first_thumb:
                 first_thumb = thumb
-            slots.append({"index": index, "pageCount": len(output_refs), "thumb": thumb})
+            slots.append({
+                "index": index,
+                "pageCount": len(output_refs),
+                "thumb": thumb,
+                "splittable": any(spreads[cursor:end]),
+            })
             cursor = end
         return {
-            "number": evidence_number,
+            "number": ordinal,
             "pageCount": sum(slot["pageCount"] for slot in slots),
             "splittable": splittable,
             "thumb": first_thumb,
@@ -924,8 +940,8 @@ class Session:
                 structural = file_merge_choice(
                     self.layout.label_template,
                     card,
-                    self.layout.filename_separator,
                     self.layout.merge_branches,
+                    self._shown(card.number),
                 )
                 if structural.warning:
                     continue
@@ -950,33 +966,23 @@ class Session:
             "message": message,
         }
 
-    def evidence_list(self) -> dict:
-        """号証と書名を、出力順のタブ区切りで返す。画面がクリップボードへ載せる。"""
-        from .plan import evidence_tsv, jobs_from_layout
-
-        with self._lock:
-            folder = self.folder if self.folder is not None else Path(".")
-            layout = self.layout
-        text = evidence_tsv(jobs_from_layout(layout, folder).jobs)
-        rows = 0 if not text else text.count("\n") + 1
-        return {"text": text, "rows": rows}
-
     def _card_view(self, card: Card) -> dict:
         from .plan import file_merge_choice
 
         slot_count = len(card.slots)
+        shown = self._shown(card.number)
         choice = file_merge_choice(
             self.layout.label_template,
             card,
-            self.layout.filename_separator,
             self.layout.merge_branches,
+            shown,
         )
         slots = []
         for index, slot in enumerate(card.slots):
             included = index in choice.included
             slots.append({
                 "index": index,
-                "label": display_label(self.layout.label_template, card.number, index, slot_count),
+                "label": display_label(self.layout.label_template, shown, index, slot_count),
                 "filename": choice.filename if choice.filename and (index == 0 or included) else self._slot_filename(card, index),
                 "title": slot.title,
                 "rotation": slot.rotation,
@@ -985,7 +991,7 @@ class Session:
             })
         return {
             "number": card.number,
-            "label": display_label(self.layout.label_template, card.number, 0, 1) if slot_count == 1 else display_label(self.layout.label_template, card.number, 0, slot_count),
+            "label": display_label(self.layout.label_template, shown, 0, 1) if slot_count == 1 else display_label(self.layout.label_template, shown, 0, slot_count),
             "title": card.slots[0].title,
             "rotation": card.slots[0].rotation,
             "splitA4": card.split_a4,
@@ -1003,11 +1009,13 @@ class Session:
         branch = branch_number(slot_index, len(card.slots))
         return output_filename(
             self.layout.label_template,
-            card.number,
+            self._shown(card.number),
             branch,
             title,
-            separator=self.layout.filename_separator,
         )
+
+    def _shown(self, ordinal: int) -> int:
+        return shown_number(self.layout.first_number, ordinal)
 
     def _card(self, number: int) -> Card:
         for card in self.layout.cards:
@@ -1058,7 +1066,10 @@ class Session:
         from .stamp import inspect_source_pages
 
         paths = self._paths(card)
-        _raw, _expanded, _splittable, natural = inspect_source_pages(paths, split=card.split_a4)
+        tilts = [slot.rotation for slot in card.slots for _stored in slot.files]
+        _raw, _expanded, _splittable, natural, _spreads = inspect_source_pages(
+            paths, split=card.split_a4, tilts=tilts,
+        )
         return list(natural), [len(slot.files) for slot in card.slots]
 
 
@@ -1462,7 +1473,10 @@ def _job_page_count(job) -> int:
         return len(job.pages)
     from .stamp import inspect_source_pages
 
-    _raw, _expanded, _splittable, natural = inspect_source_pages(job.sources, split=job.split_a4)
+    tilts = [job.rotation] * len(job.sources)
+    _raw, _expanded, _splittable, natural, _spreads = inspect_source_pages(
+        job.sources, split=job.split_a4, tilts=tilts,
+    )
     return len(natural)
 
 

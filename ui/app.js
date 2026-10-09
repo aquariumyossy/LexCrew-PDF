@@ -35,6 +35,8 @@ async function refreshApp() {
     if (media && media.ok === false && media.message) showBanner(media.message);
     card.splittable = Boolean(media && media.splittable);
     for (const slot of (media && media.slots) || []) {
+      const target = card.slots.find((item) => item.index === slot.index);
+      if (target) target.splittable = Boolean(slot.splittable);
       const image = document.querySelector(`[data-thumb="${card.number}-${slot.index}"]`);
       if (image && slot.thumb) image.src = `data:image/jpeg;base64,${slot.thumb}`;
       const pages = document.querySelector(`[data-pages="${card.number}-${slot.index}"]`);
@@ -50,11 +52,13 @@ async function refreshApp() {
 function render() {
   const series = document.getElementById("series");
   if (document.activeElement !== series) series.value = view.labelTemplate || "";
-  const separator = document.getElementById("name-separator");
-  if (document.activeElement !== separator) {
-    separator.value = view.filenameSeparator === "：" ? "colon" : "space";
-  }
+  const firstNumber = document.getElementById("first-number");
+  if (document.activeElement !== firstNumber) firstNumber.value = String(view.firstNumber || 1);
   document.getElementById("output").textContent = view.outputDir ? `保存先 ${view.outputDir}` : "";
+  const separate = !view.mergeBranches;
+  const merge = document.getElementById("merge-branches");
+  merge.classList.toggle("is-on", separate);
+  merge.setAttribute("aria-pressed", separate ? "true" : "false");
   const grayscale = document.getElementById("grayscale");
   const gray = Boolean(view.grayscale);
   grayscale.classList.toggle("is-on", gray);
@@ -149,31 +153,11 @@ function slotCard(card, slot, isLast) {
     title.addEventListener("change", () => api.set_title(card.number, titleFromFilename(title.value), slot.index).then(applyView));
   }
   meta.append(label, title);
-  if (sharesFile) {
-    const docTitle = document.createElement("input");
-    docTitle.className = "evidence-name evidence-doc-title";
-    docTitle.value = slot.title || "";
-    docTitle.placeholder = "書名";
-    docTitle.setAttribute("aria-label", "書名");
-    docTitle.disabled = locked;
-    docTitle.addEventListener("change", () => api.set_title(card.number, docTitle.value, slot.index).then(applyView));
-    meta.appendChild(docTitle);
-  }
   if (slot.outputNote) {
     const note = document.createElement("div");
     note.className = "evidence-source";
     note.textContent = slot.outputNote;
     meta.appendChild(note);
-  }
-  if (slot.index === 0 && card.slots.length > 1) {
-    const separate = !view.mergeBranches;
-    const toggle = document.createElement("button");
-    toggle.type = "button";
-    toggle.className = separate ? "btn mini evidence-merge is-on" : "btn mini evidence-merge";
-    toggle.textContent = "枝番ごとに出力";
-    toggle.setAttribute("aria-pressed", separate ? "true" : "false");
-    toggle.addEventListener("click", () => api.set_merge_branches(!view.mergeBranches).then(applyView));
-    meta.appendChild(toggle);
   }
   if (slot.index === 0 && card.mergeWarning) {
     const warn = document.createElement("p");
@@ -197,22 +181,25 @@ function slotCard(card, slot, isLast) {
     meta.appendChild(pages);
     const actions = document.createElement("div");
     actions.className = "evidence-actions";
-    actions.append(
-      miniButton("差替", () => api.choose_pdf(card.number, slot.index, true).then(applyView)),
-      miniButton("右に90°", () => api.rotate(card.number, slot.index).then(applyView)),
-    );
-    const split = miniButton("A4分割", () => api.set_split(card.number, !card.splitA4).then(applyView));
-    split.className = card.splitA4 ? "btn mini evidence-split is-on" : "btn mini evidence-split";
-    split.title = "見開きを、左から右へA4にする";
-    split.dataset.split = String(card.number);
-    split.hidden = !card.splitA4;
-    actions.appendChild(split);
+    const rotate = document.createElement("span");
+    rotate.className = "evidence-rotate";
+    rotate.appendChild(miniButton("右に90°", () => api.rotate(card.number, slot.index).then(applyView)));
     if (slot.rotation) {
       const angle = document.createElement("span");
       angle.className = "evidence-rotation";
       angle.textContent = `${slot.rotation}°`;
-      actions.appendChild(angle);
+      rotate.appendChild(angle);
     }
+    actions.append(
+      miniButton("差替", () => api.choose_pdf(card.number, slot.index, true).then(applyView)),
+      rotate,
+    );
+    const split = miniButton("分割", () => api.set_split(card.number, !card.splitA4).then(applyView));
+    split.className = card.splitA4 ? "btn mini evidence-split is-on" : "btn mini evidence-split";
+    split.title = "横の画像を、左から右へ割って縦にする";
+    split.dataset.split = `${card.number}-${slot.index}`;
+    split.hidden = !slot.splittable;
+    actions.appendChild(split);
     if (isLast) actions.appendChild(branchButton(card));
     actions.appendChild(deleteButton(card, slot));
     if (!locked) actions.appendChild(reorderHandle(article, card, slot));
@@ -283,9 +270,10 @@ function deleteButton(card, slot) {
 
 function renderSplitButtons() {
   for (const card of view.cards) {
-    document.querySelectorAll(`[data-split="${card.number}"]`).forEach((button) => {
-      button.hidden = !(card.splittable || card.splitA4);
-    });
+    for (const slot of card.slots) {
+      const button = document.querySelector(`[data-split="${card.number}-${slot.index}"]`);
+      if (button) button.hidden = !slot.splittable;
+    }
   }
 }
 
@@ -500,55 +488,63 @@ cardList.addEventListener("drop", (event) => {
   });
 });
 
-document.getElementById("name-separator").addEventListener("change", async () => {
+const firstNumberInput = document.getElementById("first-number");
+const FIRST_NUMBER_PAUSE_MS = 400;
+let firstNumberTimer = 0;
+let firstNumberPending = null;
+
+function parseFirstNumber(text) {
+  const value = String(text ?? "").trim();
+  if (!/^[1-9]\d*$/.test(value)) return null;
+  const number = Number(value);
+  if (!Number.isInteger(number) || number < 1 || number > 9999) return null;
+  return number;
+}
+
+function commitFirstNumber(force) {
+  window.clearTimeout(firstNumberTimer);
+  const parsed = parseFirstNumber(firstNumberInput.value);
+  if (parsed == null) {
+    if (!force) return;
+    const saved = String((view && view.firstNumber) || 1);
+    const dirty = firstNumberInput.value.trim() !== saved;
+    firstNumberInput.value = saved;
+    if (dirty) showBanner("開始番号は1から9999までの整数です。");
+    return;
+  }
+  if (view && parsed === view.firstNumber) {
+    firstNumberInput.value = String(parsed);
+    return;
+  }
+  if (!api || firstNumberPending === parsed) return;
+  firstNumberPending = parsed;
+  api.set_first_number(parsed).then((result) => {
+    if (firstNumberPending === parsed) firstNumberPending = null;
+    if (result && result.ok === false && result.message) showBanner(result.message);
+    applyView(result);
+  });
+}
+
+firstNumberInput.addEventListener("input", () => {
+  window.clearTimeout(firstNumberTimer);
+  firstNumberTimer = window.setTimeout(() => commitFirstNumber(false), FIRST_NUMBER_PAUSE_MS);
+});
+firstNumberInput.addEventListener("blur", () => commitFirstNumber(true));
+firstNumberInput.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  commitFirstNumber(true);
+});
+firstNumberInput.addEventListener("wheel", (event) => {
+  event.preventDefault();
+}, { passive: false });
+
+document.getElementById("merge-branches").addEventListener("click", async () => {
   if (!api || !view) return;
-  const chosen = document.getElementById("name-separator").value === "colon" ? "：" : " ";
-  const result = await api.set_filename_separator(chosen);
+  const result = await api.set_merge_branches(!view.mergeBranches);
   if (result && result.ok === false && result.message) showBanner(result.message);
   applyView(result);
 });
-
-document.getElementById("copy-list").addEventListener("click", () => copyEvidenceList());
-
-async function copyEvidenceList() {
-  if (!api) return;
-  const result = await api.evidence_list();
-  if (!result || result.ok === false) {
-    showBanner(result && result.message ? result.message : "一覧をコピーできませんでした。");
-    return;
-  }
-  if (!result.text) {
-    showBanner("コピーする号証がありません。");
-    return;
-  }
-  const copied = await copyText(result.text);
-  showBanner(copied ? "証拠説明書用の一覧をコピーしました。" : "一覧をコピーできませんでした。");
-}
-
-async function copyText(text) {
-  try {
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      await navigator.clipboard.writeText(text);
-      return true;
-    }
-  } catch (error) {
-    // WebView2 で拒否されたときは、下の選択コピーへ落とす。
-  }
-  try {
-    const area = document.createElement("textarea");
-    area.value = text;
-    area.setAttribute("readonly", "");
-    area.style.position = "fixed";
-    area.style.left = "-1000px";
-    document.body.appendChild(area);
-    area.select();
-    const ok = document.execCommand("copy");
-    area.remove();
-    return ok;
-  } catch (error) {
-    return false;
-  }
-}
 
 document.getElementById("grayscale").addEventListener("click", async () => {
   if (!api || !view) return;
@@ -560,7 +556,7 @@ document.getElementById("grayscale").addEventListener("click", async () => {
 document.getElementById("clear").addEventListener("click", async () => {
   if (!api || generating) return;
   const editing = Boolean(view && view.editor);
-  let message = "カードを初期状態に戻します。原本、書名、枝番、追加したカード、ページ順、番号の種類、ファイル名の区切り、枝番のまとめ、白黒、印の色、印の大きさ、印のフォントは消え、甲第１号証から甲第６号証の空のカードになります。生成済みの証拠PDFは残ります。";
+  let message = "カードを初期状態に戻します。原本、書名、枝番、追加したカード、ページ順、番号の種類、開始番号、枝番のまとめ、白黒、印の色、印の大きさ、印のフォントは消え、甲第１号証から甲第６号証の空のカードになります。生成済みの証拠PDFは残ります。";
   if (editing) message += "開いている編集ウィンドウも閉じます。";
   if (!window.confirm(message)) return;
   const button = document.getElementById("clear");

@@ -456,6 +456,57 @@ def test_a4_landscape_splits_left_then_right_onto_a4(tmp_path):
         halves.close()
 
 
+def test_a4_portrait_turned_sideways_splits_the_view_left_then_right(tmp_path):
+    _require_font()
+    source = tmp_path / "a4tall.pdf"
+    document = fitz.open()
+    page = document.new_page(width=595, height=842)
+    page.insert_text((72, 80), "TOPWORD")
+    page.insert_text((72, 780), "BOTTOMWORD")
+    document.save(source)
+    document.close()
+    upright = _open_stamped(stamp_sources_to_pdf([str(source)], "甲第６号証", tilt=90, split=True))
+    try:
+        assert upright.page_count == 2
+        _assert_a4_portrait(upright[0])
+        _assert_a4_portrait(upright[1])
+        assert "BOTTOMWORD" in upright[0].get_text("text")
+        assert "TOPWORD" not in upright[0].get_text("text")
+        assert "TOPWORD" in upright[1].get_text("text")
+        assert "BOTTOMWORD" not in upright[1].get_text("text")
+    finally:
+        upright.close()
+
+
+def test_a4_landscape_turned_upright_is_not_split(tmp_path):
+    _require_font()
+    source = tmp_path / "a4wide.pdf"
+    document = fitz.open()
+    page = document.new_page(width=842, height=595)
+    page.insert_text((40, 80), "LEFTSIDE")
+    page.insert_text((842 - 160, 80), "RIGHTSIDE")
+    document.save(source)
+    document.close()
+    turned = _open_stamped(stamp_sources_to_pdf([str(source)], "甲第６号証", tilt=90, split=True))
+    try:
+        assert turned.page_count == 1
+        text = turned[0].get_text("text")
+        assert "LEFTSIDE" in text
+        assert "RIGHTSIDE" in text
+    finally:
+        turned.close()
+
+
+def test_a3_portrait_is_not_split(tmp_path):
+    source = tmp_path / "a3tall.pdf"
+    document = fitz.open()
+    document.new_page(width=842, height=1191)
+    document.save(source)
+    document.close()
+    raw, expanded, splittable = describe_source_pages([str(source)])
+    assert (raw, expanded, splittable) == (1, 1, False)
+
+
 def test_rotated_a4_portrait_box_splits_the_viewed_spread(tmp_path):
     _require_font()
     source = tmp_path / "rotated-a4.pdf"
@@ -733,7 +784,7 @@ def test_full_page_mask_keeps_the_stamp_and_rotation_still_covers_the_word(tmp_p
         covered.close()
 
 
-def test_split_and_tilt_mask_removes_only_the_covered_half(tmp_path):
+def test_sideways_a3_stays_one_page_and_the_mask_still_covers_the_word(tmp_path):
     _require_font()
     source = tmp_path / "spread.pdf"
     document = fitz.open()
@@ -744,7 +795,7 @@ def test_split_and_tilt_mask_removes_only_the_covered_half(tmp_path):
     document.close()
     left = _word_mask(source, "LEFTSIDE")
     missing = SimpleNamespace(source=0, page=9, x=0, y=0, w=20, h=20)
-    halves = _open_stamped(stamp_sources_to_pdf(
+    turned = _open_stamped(stamp_sources_to_pdf(
         [str(source)],
         "甲第３号証",
         tilt=90,
@@ -752,14 +803,13 @@ def test_split_and_tilt_mask_removes_only_the_covered_half(tmp_path):
         masks=(left, missing),
     ))
     try:
-        assert halves.page_count == 2
-        assert "LEFTSIDE" not in halves[0].get_text("text")
-        assert "LEFTSIDE" not in halves[1].get_text("text")
-        joined = halves[0].get_text("text") + halves[1].get_text("text")
-        assert "RIGHTSIDE" in joined
-        assert "甲第３号証" in halves[0].get_text("text")
+        assert turned.page_count == 1
+        text = turned[0].get_text("text")
+        assert "LEFTSIDE" not in text
+        assert "RIGHTSIDE" in text
+        assert "甲第３号証" in text
     finally:
-        halves.close()
+        turned.close()
 
 
 def test_piece_jpeg_burns_the_mask_and_the_editor_preview_does_not(tmp_path):

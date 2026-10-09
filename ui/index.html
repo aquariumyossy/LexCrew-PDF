@@ -35,11 +35,23 @@
     }
     h1 { font-size: 16px; margin: 0 8px 0 0; font-weight: 700; }
     select, input { font: inherit; color: inherit; }
-    select, .series-input {
+    select, .series-input, .start-field input {
       border: 1px solid var(--line);
       border-radius: 8px;
       background: #fff;
       padding: 7px 8px;
+    }
+    .start-field {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .start-field input {
+      width: 4.55em;
+      color: var(--text);
+      font-size: 15px;
     }
     .series-field { position: relative; width: 13.5em; }
     .series-input { width: 100%; padding-right: 1.8em; }
@@ -218,14 +230,6 @@
       background: #d6e4ff;
       color: var(--accent);
     }
-    .separator-field {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      font-size: 13px;
-      color: var(--muted);
-    }
-    .separator-field select { color: var(--text); }
     #output { flex: 1 1 220px; margin: 0; font-size: 12px; color: var(--muted); }
     #banner { margin: 0 16px 10px; font-size: 13px; }
     #cards {
@@ -392,13 +396,13 @@
       background: #d6e4ff;
       color: var(--accent);
     }
+    .evidence-rotate {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
     .evidence-rotation { font-size: 12px; color: var(--muted); }
     input.evidence-name[readonly] { color: var(--muted); }
-    input.evidence-doc-title {
-      margin-top: 4px;
-      font-size: 13px;
-      font-weight: 400;
-    }
     .evidence-merge { margin-top: 6px; }
     .evidence-message { color: var(--danger); font-size: 12px; margin: 6px 0 0; }
     .evidence-card.is-locked { border-color: #9db7e8; }
@@ -440,18 +444,16 @@
         <li><button type="button" data-value="資料N">資料N</button></li>
       </ul>
     </div>
-    <label class="separator-field">区切り
-      <select id="name-separator" aria-label="ファイル名の区切り">
-        <option value="space">半角スペース</option>
-        <option value="colon">全角コロン</option>
-      </select>
+    <label class="start-field">
+      開始
+      <input id="first-number" type="number" min="1" max="9999" step="1" value="1" inputmode="numeric" />
     </label>
+    <button id="merge-branches" class="btn" type="button" aria-pressed="false">枝番ごとに出力</button>
     <p id="output"></p>
     <div class="header-actions">
       <button id="help-open" class="btn" type="button">使い方</button>
       <button id="clear" class="btn danger" type="button">クリア</button>
       <button id="stamp-open" class="btn" type="button">スタンプ</button>
-      <button id="copy-list" class="btn" type="button">一覧をコピー</button>
       <button id="grayscale" class="btn" type="button" aria-pressed="false">白黒</button>
       <button id="generate" class="btn primary" type="button">証拠PDFを生成</button>
     </div>
@@ -466,21 +468,20 @@
     <h2 id="help-title">使い方</h2>
     <ol class="steps">
       <li>起動すると、保存されたカードがあればそれを出します。無ければ甲第１号証から甲第６号証までの空のカードが6枚出ます。</li>
-      <li>ヘッダーの欄で番号の形を選びます。選べるのは甲第N号証、乙第N号証、丙第N号証、疎甲第N号証、疎乙第N号証、疎丙第N号証、別紙N、資料Nです。乙A第N号証のように、甲乙丙丁戊のあとに英字1字を書いた形も使えます。ファイル名は乙A001になります。</li>
+      <li>ヘッダーの欄で番号の形を選びます。選べるのは甲第N号証、乙第N号証、丙第N号証、疎甲第N号証、疎乙第N号証、疎丙第N号証、別紙N、資料Nです。乙A第N号証のように、甲乙丙丁戊のあとに英字1字を書いた形も使えます。ファイル名は乙A001になります。隣の開始は先頭カードの番号です。1以上の整数で、後ろのカードはその数から増えます。</li>
       <li>PDF の無いカードは、中央の「ファイルを追加」で足します。カードへドロップしても足せます。ファイルがあるカードは「差替」と「右に90°」を使います。サムネイルへ別の PDF をドロップすると差替になります。</li>
       <li>「枝番」を押すと、の１、の２が別のカードになります。サムネイル、順番、マスキングは枝番ごとに分かれます。ページの無い枝番は PDF を出しません。</li>
-      <li>枝番が2つ以上ある号証は、初期状態では1つのPDFにまとめて出します。名前は「甲001-1~3 書名.pdf」のように、入っている最初の枝番から最後の枝番を~でつなぎます。書名は最初の枝番（親カード）の書名で、親カードのファイル名欄から直せます。他の枝番の書名は、そのカードの「書名」欄です。各枝番のカードに「→ 甲001-1~3 に含めて出力」と出ます。各枝番の先頭ページに、その枝番の印が付きます。親カードの「枝番ごとに出力」を押すと、案件の枝番はすべて別のPDFになります。</li>
+      <li>枝番が2つ以上ある号証は、初期状態では1つのPDFにまとめて出します。名前は「甲001-1~3 書名.pdf」のように、入っている最初の枝番から最後の枝番を~でつなぎます。書名は最初の枝番（親カード）の書名で、親カードのファイル名欄から直せます。各枝番のカードに「→ 甲001-1~3 に含めて出力」と出ます。各枝番の先頭ページに、その枝番の印が付きます。ヘッダーの「枝番ごとに出力」を押すと、この案件の枝番はすべて別のPDFになります。</li>
       <li>間の枝番にPDFが無いと、甲001-1~3 のようにはまとめません。カードに「PDFが無いため、まとめて出力しません」と出ます。空の枝番を削除すると番号が詰まり、そのあとまとまります。画面で枝番の最後の1ページは外せないので、出すページが全部無くなることはありません。</li>
       <li>末尾の「カードを追加」で次の番号を足します。「削除」でそのカードを消すと、後ろの番号が詰まります。右下のつまみで順番を変えると、証拠番号、印、ファイル名が付いて変わります。</li>
       <li>書名が空のときは、そのカードへ最初に足したPDFのファイル名から拡張子を除いた名前を使います。先頭に「甲1 」や「甲第2号証_」や「乙3の1 」のような号証番号があるときは、それを除きます。</li>
-      <li>「区切り」で、ファイル名の番号と書名のあいだを半角スペースか全角コロンにします。初期値は半角スペースで、「甲001 売買契約書.pdf」になります。ファイル名は.pdfを含めて100文字までです。長い書名は後ろを切ります。</li>
-      <li>「一覧をコピー」で、号証と書名をタブ区切りでコピーします。枝番も1行です。ExcelやWordの証拠説明書へ貼れます。</li>
-      <li>A3 の見開きには「A4分割」が出ます。左から右へ A4 にします。</li>
+      <li>ファイル名は「甲001 売買契約書.pdf」です。番号と書名のあいだは半角スペースです。ファイル名は.pdfを含めて100文字までです。長い書名は後ろを切ります。</li>
+      <li>見えている画像が横長のA3かA4のとき「分割」が出ます。左から右へ割って、縦のページにします。右に90°で縦横が変わると、ボタンもそれに合わせます。</li>
       <li>サムネイルをクリックすると編集ウィンドウが開きます。編集中のカードは、メイン画面で差替、回転、削除ができません。</li>
       <li>「証拠PDFを生成」で、ダウンロードフォルダの「LexCrew-PDF-Downloads」に印付き PDF を書きます。1件以上書けたときは、そのフォルダをエクスプローラーで開きます。ヘッダーに保存先が出ます。カードを変えるたびに、同じフォルダの layout.json を上書きします。原本の PDF はコピーしません。</li>
       <li>「スタンプ」で、印の色、大きさ、フォントを変えます。色は赤、青、緑、黒です。フォントは明朝とゴシックです。大きさは 8 から 24 ポイントです。初期値は赤、11 ポイント、明朝です。</li>
       <li>「白黒」を押すと、載せたページを灰色にしてから、設定した色の印を押します。</li>
-      <li>「クリア」はカードを起動直後の6枚に戻します。生成済みの証拠 PDF は残ります。</li>
+      <li>「クリア」はカード、開始番号、枝番のまとめを起動直後に戻します。生成済みの証拠 PDF は残ります。</li>
     </ol>
     <h2>ページ編集</h2>
     <ul class="notes">
@@ -488,7 +489,7 @@
       <li>「元に戻す」で、その枝番のページ順を原本に戻します。削りと傾きは残ります。</li>
       <li>「マスキング」でページ上をドラッグすると、その範囲を黒く覆います。生成した PDF では、その範囲の文字と画像は戻りません。右上の X で外せます。</li>
       <li>見ているページの四辺をドラッグすると、その端を 1% 刻みで最大 40% まで削れます。中身は拡大せず、同じ位置に残ります。「トリムクリア」でそのページの削りを戻します。</li>
-      <li>◁ ▷ で、見ているページを 0.1 度ずつ、左右に最大 10 度まで傾けます。押し続けているあいだは画面上だけが回り、離すと保存されます。印は回りません。傾きの表示をダブルクリックすると 0 度に戻ります。A4分割を切り替えると傾きは消えます。</li>
+      <li>◁ ▷ で、見ているページを 0.1 度ずつ、左右に最大 10 度まで傾けます。押し続けているあいだは画面上だけが回り、離すと保存されます。印は回りません。傾きの表示をダブルクリックすると 0 度に戻ります。分割を切り替えると傾きは消えます。</li>
       <li>1ページ目の印はドラッグで動かせます。2ページ目以降には付きません。</li>
     </ul>
     <h2>クレジット</h2>

@@ -1,12 +1,14 @@
-"""枝番の合体、区切り、号証一覧。"""
+"""枝番の合体。"""
 import json
+import os
 
 import fitz
 import pytest
 
-from lexcrew_pdf.layout import load_layout, parse_layout
-from lexcrew_pdf.plan import evidence_tsv, jobs_from_layout, slot_job
+from lexcrew_pdf.layout import default_layout, layout_to_json, load_layout, parse_layout, with_next_series
+from lexcrew_pdf.plan import jobs_from_layout, slot_job
 from lexcrew_pdf.session import Session
+from lexcrew_pdf.stamp import yu_mincho_path
 
 
 def _pdf(path, text="PAGE"):
@@ -54,12 +56,14 @@ def test_merge_is_on_until_branches_are_output_separately(tmp_path):
     assert view["slots"][1]["outputNote"] == "→ 甲001-1~2 に含めて出力"
     assert view["mergedFilename"] == "甲001-1~2 契約.pdf"
     assert view["mergeWarning"] == ""
-    assert evidence_tsv(merged.jobs) == "甲第１号証の１\t契約\n甲第１号証の２\t領収"
+    assert [part.exhibit for part in job.parts] == ["甲001-1", "甲001-2"]
     session.set_title(1, "領収書", 1)
     view = session.view()["cards"][0]
     assert view["slots"][0]["filename"] == "甲001-1~2 契約.pdf"
     assert view["slots"][1]["title"] == "領収書"
-    assert evidence_tsv(jobs_from_layout(session.layout, tmp_path).jobs) == "甲第１号証の１\t契約\n甲第１号証の２\t領収書"
+    updated = jobs_from_layout(session.layout, tmp_path).jobs[0]
+    assert [part.exhibit for part in updated.parts] == ["甲001-1", "甲001-2"]
+    assert [part.title for part in updated.parts] == ["契約", "領収書"]
 
     second_slot = slot_job(merged.jobs, 1, 1)
     assert second_slot is not None
@@ -237,45 +241,39 @@ def test_unreadable_merge_preserves_the_combined_name(tmp_path):
     assert built.preserve == ("甲001-1~2 契約.pdf",)
 
 
-def test_separator_choice_is_saved_and_survives_other_settings(tmp_path):
+def test_merge_and_grayscale_are_saved_together(tmp_path):
     source = tmp_path / "契約書.pdf"
     _pdf(source)
     session = Session(tmp_path)
-    assert session.view()["filenameSeparator"] == " "
     assert session.view()["mergeBranches"] is True
-    session.set_filename_separator("：")
+    assert "filenameSeparator" not in session.view()
     session.add_file(1, 0, str(source))
     session.add_branch(1)
     session.add_file(1, 1, str(source))
     session.set_grayscale(True)
-    assert session.layout.filename_separator == "："
     assert session.layout.merge_branches is True
-    assert session.view()["cards"][0]["slots"][0]["filename"] == "甲001-1~2：契約書.pdf"
-    assert session.view()["cards"][0]["slots"][1]["filename"] == "甲001-1~2：契約書.pdf"
-    assert session.view()["cards"][0]["mergedFilename"] == "甲001-1~2：契約書.pdf"
-    raw = json.loads((tmp_path / "LexCrew-PDF-Downloads" / "layout.json").read_text(encoding="utf-8"))
-    assert raw["filenameSeparator"] == "："
-    assert "mergeBranches" not in raw
-    loaded = Session(tmp_path)
-    assert loaded.layout.filename_separator == "："
-    assert loaded.layout.merge_branches is True
-    assert loaded.layout.grayscale is True
-    session.set_filename_separator(" ")
-    session.set_merge_branches(False)
+    assert session.view()["cards"][0]["slots"][0]["filename"] == "甲001-1~2 契約書.pdf"
+    assert session.view()["cards"][0]["slots"][1]["filename"] == "甲001-1~2 契約書.pdf"
+    assert session.view()["cards"][0]["mergedFilename"] == "甲001-1~2 契約書.pdf"
     raw = json.loads((tmp_path / "LexCrew-PDF-Downloads" / "layout.json").read_text(encoding="utf-8"))
     assert "filenameSeparator" not in raw
+    assert "mergeBranches" not in raw
+    loaded = Session(tmp_path)
+    assert loaded.layout.merge_branches is True
+    assert loaded.layout.grayscale is True
+    session.set_merge_branches(False)
+    raw = json.loads((tmp_path / "LexCrew-PDF-Downloads" / "layout.json").read_text(encoding="utf-8"))
     assert raw["mergeBranches"] is False
     loaded = Session(tmp_path)
     assert loaded.layout.merge_branches is False
     session.clear()
-    assert session.layout.filename_separator == " "
     assert session.layout.merge_branches is True
     assert session.layout.grayscale is False
     raw = json.loads((tmp_path / "LexCrew-PDF-Downloads" / "layout.json").read_text(encoding="utf-8"))
     assert "mergeBranches" not in raw
 
 
-def test_old_layout_without_the_new_keys_uses_a_space(tmp_path):
+def test_old_layout_without_the_new_keys_merges_branches(tmp_path):
     evidence = tmp_path / "LexCrew-PDF-Downloads"
     evidence.mkdir()
     (evidence / "layout.json").write_text(
@@ -289,7 +287,6 @@ def test_old_layout_without_the_new_keys_uses_a_space(tmp_path):
         encoding="utf-8",
     )
     loaded = load_layout(tmp_path)
-    assert loaded.filename_separator == " "
     assert loaded.merge_branches is True
     kept = parse_layout({
         "series": "甲",
@@ -300,15 +297,34 @@ def test_old_layout_without_the_new_keys_uses_a_space(tmp_path):
         "mergeBranches": True,
     })
     assert kept.merge_branches is True
-    with pytest.raises(ValueError, match="配置ファイルを読めません"):
-        parse_layout({
-            "series": "甲",
-            "labelTemplate": "甲第N号証",
-            "enabledSeries": ["甲", "乙", "丙"],
-            "cards": [{"number": 1, "slots": [{"files": [], "title": ""}]}],
-            "lastWritten": [],
-            "filenameSeparator": ":",
-        })
+
+
+def test_saved_filename_separator_is_ignored(tmp_path):
+    source = tmp_path / "契約書.pdf"
+    _pdf(source)
+    evidence = tmp_path / "LexCrew-PDF-Downloads"
+    evidence.mkdir()
+    payload = {
+        "series": "甲",
+        "labelTemplate": "甲第N号証",
+        "enabledSeries": ["甲", "乙", "丙"],
+        "cards": [{"number": 1, "slots": [{"files": ["契約書.pdf"], "title": "契約書"}]}],
+        "lastWritten": [],
+        "filenameSeparator": "：",
+        "mergeBranches": False,
+    }
+    (evidence / "layout.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    session = Session(tmp_path)
+    assert session.view()["cards"][0]["slots"][0]["filename"] == "甲001 契約書.pdf"
+    assert session.layout.merge_branches is False
+    session.set_grayscale(True)
+    raw = json.loads((evidence / "layout.json").read_text(encoding="utf-8"))
+    assert "filenameSeparator" not in raw
+    assert raw["mergeBranches"] is False
+    payload["filenameSeparator"] = ":"
+    ignored = parse_layout(payload)
+    assert "filenameSeparator" not in layout_to_json(ignored)
+    assert ignored.merge_branches is False
 
 
 def test_party_letter_template_is_saved_and_numbered(tmp_path):
@@ -319,7 +335,10 @@ def test_party_letter_template_is_saved_and_numbered(tmp_path):
     session.add_file(1, 0, str(source))
     assert session.layout.series == "乙A"
     assert session.view()["cards"][0]["slots"][0]["filename"] == "乙A001 準備書面.pdf"
-    assert jobs_from_layout(session.layout, tmp_path).jobs[0].stamp == "乙A第１号証"
+    built = jobs_from_layout(session.layout, tmp_path)
+    assert built.jobs[0].stamp == "乙A第１号証"
+    assert built.jobs[0].exhibit == "乙A001"
+    assert built.jobs[0].title == "準備書面"
     assert Session(tmp_path).layout.label_template == "乙A第N号証"
 
 
@@ -340,29 +359,49 @@ def test_fallback_title_does_not_keep_the_old_exhibit_number(tmp_path):
     session.add_file(3, 1, str(memo))
     names = [slot["filename"] for slot in session.view()["cards"][2]["slots"]]
     assert names == ["甲003-1~2 納品書.pdf", "甲003-1~2 納品書.pdf"]
-    assert evidence_tsv(jobs_from_layout(session.layout, tmp_path).jobs).split("\n")[-2:] == [
-        "甲第３号証の１\t納品書",
-        "甲第３号証の２\t覚書",
-    ]
+    job = jobs_from_layout(session.layout, tmp_path).jobs[-1]
+    assert [part.exhibit for part in job.parts] == ["甲003-1", "甲003-2"]
+    assert [part.title for part in job.parts] == ["納品書", "覚書"]
 
 
-def test_evidence_list_follows_output_order_and_escapes_tabs(tmp_path):
+def test_jobs_follow_card_order(tmp_path):
     first = tmp_path / "あ.pdf"
     second = tmp_path / "い.pdf"
     _pdf(first)
     _pdf(second)
     session = Session(tmp_path)
     session.add_file(2, 0, str(second))
-    session.set_title(2, "売買\t契約\n書")
+    session.set_title(2, "売買契約書")
     session.add_file(1, 0, str(first))
     session.set_title(1, "先頭")
-    listed = session.evidence_list()
-    assert listed["rows"] == 2
-    assert listed["text"] == "甲第１号証\t先頭\n甲第２号証\t売買 契約 書"
-    assert session.evidence_list()["text"].count("\n") == 1
-    empty = Session(tmp_path)
-    empty.clear()
-    assert empty.evidence_list() == {"text": "", "rows": 0}
+    built = jobs_from_layout(session.layout, tmp_path)
+    assert [job.exhibit for job in built.jobs] == ["甲001", "甲002"]
+    assert [job.title for job in built.jobs] == ["先頭", "売買契約書"]
+
+
+def test_unreadable_cards_keep_their_names_and_later_cards_still_generate(tmp_path):
+    broken = tmp_path / "甲1 売買契約書.pdf"
+    later = tmp_path / "領収.pdf"
+    branch = tmp_path / "納品.pdf"
+    good = tmp_path / "覚書.pdf"
+    broken.write_bytes(b"not a pdf")
+    later.write_bytes(b"also not")
+    _pdf(branch)
+    _pdf(good)
+    session = Session(tmp_path)
+    session.add_file(1, 0, str(broken))
+    session.add_branch(1)
+    session.add_file(1, 1, str(branch))
+    session.set_title(1, "契約", 0)
+    session.add_file(2, 0, str(later))
+    session.set_title(2, "領収書")
+    session.add_file(3, 0, str(good))
+    session.set_title(3, "覚書")
+    built = jobs_from_layout(session.layout, tmp_path)
+    assert [job.filename for job in built.jobs] == ["甲003 覚書.pdf"]
+    assert [row["number"] for row in built.errors] == [1, 2]
+    assert all(row["message"].startswith("原本を開けません。") for row in built.errors)
+    assert built.preserve == ("甲001-1~2 契約.pdf", "甲002 領収書.pdf")
 
 
 def test_long_title_on_a_job_stays_within_100_characters(tmp_path):
@@ -375,3 +414,100 @@ def test_long_title_on_a_job_stays_within_100_characters(tmp_path):
     assert len(name) <= 100
     assert name.startswith("甲001 ")
     assert name.endswith(".pdf")
+
+
+def test_first_number_shifts_filename_stamp_and_list(tmp_path, monkeypatch):
+    source = tmp_path / "a.pdf"
+    _pdf(source)
+    session = Session(tmp_path)
+    session.add_file(1, 0, str(source))
+    session.begin_edit(1, 0)
+    view = session.set_first_number(7.0)
+    assert view["firstNumber"] == 7
+    assert [card["number"] for card in view["cards"]] == [1, 2, 3, 4, 5, 6]
+    assert view["cards"][0]["label"] == "甲第７号証"
+    assert view["cards"][0]["slots"][0]["filename"] == "甲007 a.pdf"
+    assert view["cards"][5]["label"] == "甲第１２号証"
+    assert session.edit_context()["label"] == "甲第７号証"
+    assert session.editor_identity() == {"number": 1, "slot": 0}
+    session.finish_edit()
+    built = jobs_from_layout(session.layout, tmp_path)
+    assert built.jobs[0].number == 1
+    assert built.jobs[0].stamp == "甲第７号証"
+    assert built.jobs[0].exhibit == "甲007"
+    assert built.jobs[0].filename == "甲007 a.pdf"
+    assert built.jobs[0].title == "a"
+    if os.path.isfile(yu_mincho_path()):
+        generated = session.generate()
+        assert generated["ok"] is True
+        assert generated["written"][0]["filename"] == "甲007 a.pdf"
+        assert generated["written"][0]["stampLabel"] == "甲第７号証"
+        document = fitz.open(tmp_path / "LexCrew-PDF-Downloads" / "甲007 a.pdf")
+        try:
+            assert "甲第７号証" in document[0].get_text("text")
+        finally:
+            document.close()
+    session.set_title(1, "契約")
+    session.set_grayscale(True)
+    session.set_series("乙")
+    assert session.layout.first_number == 7
+    assert session.view()["cards"][0]["label"] == "乙第７号証"
+    assert with_next_series(session.layout).first_number == 7
+    raw = json.loads((tmp_path / "LexCrew-PDF-Downloads" / "layout.json").read_text(encoding="utf-8"))
+    assert raw["firstNumber"] == 7
+    assert load_layout(tmp_path).first_number == 7
+    session.add_branch(2)
+    assert session.view()["cards"][1]["slots"][0]["label"] == "乙第８号証の１"
+    deleted = session.delete_slot(1, 0)
+    assert deleted["firstNumber"] == 7
+    assert deleted["cards"][0]["number"] == 1
+    assert deleted["cards"][0]["slots"][0]["label"] == "乙第７号証の１"
+    for bad in (0, 1.5, 10000, True, "7"):
+        with pytest.raises(ValueError, match="開始番号は1から9999までの整数です。"):
+            session.set_first_number(bad)
+    assert session.layout.first_number == 7
+    session.clear()
+    assert session.view()["firstNumber"] == 1
+    assert session.view()["cards"][0]["label"] == "甲第１号証"
+    assert "firstNumber" not in layout_to_json(session.layout)
+
+
+def test_missing_first_number_is_one_and_bad_values_are_rejected():
+    raw = layout_to_json(default_layout())
+    assert "firstNumber" not in raw
+    assert parse_layout(raw).first_number == 1
+    assert parse_layout({**raw, "firstNumber": 7}).first_number == 7
+    for bad in (0, 10000, 1.5, True, "7"):
+        with pytest.raises(ValueError, match="配置ファイルを読めません。"):
+            parse_layout({**raw, "firstNumber": bad})
+
+
+def test_unreadable_file_keeps_the_shown_filename(tmp_path):
+    broken = tmp_path / "壊れ.pdf"
+    broken.write_bytes(b"not a pdf")
+    session = Session(tmp_path)
+    session.set_first_number(7)
+    session.add_file(1, 0, str(broken))
+    built = jobs_from_layout(session.layout, tmp_path)
+    assert built.jobs == ()
+    assert built.preserve == ("甲007 壊れ.pdf",)
+    assert built.errors[0]["number"] == 1
+    assert built.errors[0]["message"].startswith("原本を開けません。")
+
+
+def test_media_keeps_the_ordinal_and_stamps_the_shown_number(tmp_path, monkeypatch):
+    source = tmp_path / "a.pdf"
+    _pdf(source)
+    seen = {}
+
+    def fake_render(paths, stamp, *args, **kwargs):
+        seen["stamp"] = stamp
+        return b"jpeg"
+
+    monkeypatch.setattr("lexcrew_pdf.stamp.render_stamped_page_jpeg", fake_render)
+    session = Session(tmp_path)
+    session.add_file(1, 0, str(source))
+    session.set_first_number(7)
+    media = session.media(1)
+    assert media["number"] == 1
+    assert seen["stamp"] == "甲第７号証"

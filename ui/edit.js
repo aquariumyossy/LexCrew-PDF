@@ -69,12 +69,13 @@ window.invalidatePreview = () => {
   refreshContext(false).then(() => observePages());
 };
 
-window.reloadAppearance = () => {
+window.reloadAppearance = async () => {
   previewEpoch += 1;
   previewCache.clear();
   thumbCache.clear();
-  if (!api || !output.length) return;
-  draw();
+  if (!api) return;
+  await refreshContext(false);
+  if (output.length) draw();
 };
 
 window.addEventListener("pywebviewready", () => {
@@ -607,8 +608,14 @@ function paintStamp() {
   button.style.top = `${(y / stampFrame.pageHeight) * 100}%`;
   button.style.width = `${(stampFrame.boxWidth / stampFrame.pageWidth) * 100}%`;
   button.style.height = `${(stampFrame.boxHeight / stampFrame.pageHeight) * 100}%`;
-  button.style.fontSize = `${STAMP_FONT_PT * scale}px`;
-  button.style.borderWidth = live ? `${STAMP_BORDER_PT * scale}px` : "0";
+  const fontSize = stampFrame.fontSize || STAMP_FONT_PT;
+  const border = stampFrame.borderWidth || STAMP_BORDER_PT;
+  const color = stampFrame.color || "#ff0000";
+  button.style.color = color;
+  button.style.borderColor = live ? color : "transparent";
+  button.style.fontFamily = stampFrame.fontFamily || '"Yu Mincho", "YuMincho", "游明朝", serif';
+  button.style.fontSize = `${fontSize * scale}px`;
+  button.style.borderWidth = live ? `${border * scale}px` : "0";
   button.classList.toggle("is-live", live);
   button.textContent = live ? stampLabel : "";
   button.setAttribute("aria-label", `${stampLabel || "証拠番号"}の位置`);

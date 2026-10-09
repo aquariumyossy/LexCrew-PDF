@@ -212,7 +212,8 @@
     }
     #help .oss-name { font-size: 13px; font-weight: 700; }
     #help .oss-meta { color: var(--muted); font-size: 12px; line-height: 1.45; }
-    #grayscale.is-on {
+    #grayscale.is-on,
+    .btn.is-on {
       border-color: #72a0eb;
       background: #d6e4ff;
       color: var(--accent);
@@ -226,6 +227,47 @@
       align-content: flex-start;
       align-items: flex-start;
       padding: 2px 16px 24px;
+    }
+    #stamp-settings {
+      width: min(28rem, calc(100% - 32px));
+      margin: auto;
+      padding: 16px 18px 18px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #fff;
+      color: var(--text);
+      font: inherit;
+      box-shadow: 0 8px 24px rgba(26, 36, 56, 0.12);
+    }
+    #stamp-settings::backdrop { background: rgba(26, 36, 56, 0.35); }
+    #stamp-settings h2 { margin: 0 0 14px; font-size: 15px; }
+    .stamp-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin: 0 0 12px;
+    }
+    #stamp-size { flex: 1; }
+    .stamp-color {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .stamp-swatch {
+      width: 12px;
+      height: 12px;
+      border-radius: 2px;
+      border: 1px solid rgba(26, 36, 56, 0.25);
+    }
+    #stamp-sample {
+      margin: 4px 0 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 4px 10px;
+      border-style: solid;
+      line-height: 1.2;
+      font-weight: 600;
     }
     .evidence-card {
       width: 280px;
@@ -387,6 +429,7 @@
     <div class="header-actions">
       <button id="help-open" class="btn" type="button">使い方</button>
       <button id="clear" class="btn danger" type="button">クリア</button>
+      <button id="stamp-open" class="btn" type="button">スタンプ</button>
       <button id="grayscale" class="btn" type="button" aria-pressed="false">白黒</button>
       <button id="generate" class="btn primary" type="button">証拠PDFを生成</button>
     </div>
@@ -409,7 +452,8 @@
       <li>A3 の見開きには「A4分割」が出ます。左から右へ A4 にします。</li>
       <li>サムネイルをクリックすると編集ウィンドウが開きます。編集中のカードは、メイン画面で差替、回転、削除ができません。</li>
       <li>「証拠PDFを生成」で、ダウンロードフォルダの「LexCrew-PDF-Downloads」に印付き PDF を書きます。1件以上書けたときは、そのフォルダをエクスプローラーで開きます。ヘッダーに保存先が出ます。カードを変えるたびに、同じフォルダの layout.json を上書きします。原本の PDF はコピーしません。</li>
-      <li>「白黒」を押すと、載せたページを灰色にしてから赤い印を押します。</li>
+      <li>「スタンプ」で、印の色、大きさ、フォントを変えます。色は赤、青、緑、黒です。フォントは明朝とゴシックです。大きさは 8 から 24 ポイントです。初期値は赤、11 ポイント、明朝です。</li>
+      <li>「白黒」を押すと、載せたページを灰色にしてから、設定した色の印を押します。</li>
       <li>「クリア」はカードを起動直後の6枚に戻します。生成済みの証拠 PDF は残ります。</li>
     </ol>
     <h2>ページ編集</h2>
@@ -419,7 +463,7 @@
       <li>「マスキング」でページ上をドラッグすると、その範囲を黒く覆います。生成した PDF では、その範囲の文字と画像は戻りません。右上の X で外せます。</li>
       <li>見ているページの四辺をドラッグすると、その端を 1% 刻みで最大 40% まで削れます。中身は拡大せず、同じ位置に残ります。「トリムクリア」でそのページの削りを戻します。</li>
       <li>◁ ▷ で、見ているページを 0.1 度ずつ、左右に最大 10 度まで傾けます。押し続けているあいだは画面上だけが回り、離すと保存されます。印は回りません。傾きの表示をダブルクリックすると 0 度に戻ります。A4分割を切り替えると傾きは消えます。</li>
-      <li>1ページ目の赤い印はドラッグで動かせます。2ページ目以降には付きません。</li>
+      <li>1ページ目の印はドラッグで動かせます。2ページ目以降には付きません。</li>
     </ul>
     <h2>クレジット</h2>
     <p class="credit">開発者　弁護士　吉田秀平</p>
@@ -436,6 +480,30 @@
       <li><span class="oss-name">pycparser 3.0</span><span class="oss-meta">BSD 3-Clause。Eli Bendersky。</span></li>
     </ul>
     </div>
+  </dialog>
+  <dialog id="stamp-settings" aria-labelledby="stamp-title">
+    <div class="help-bar">
+      <button id="stamp-close" class="btn" type="button">閉じる</button>
+    </div>
+    <h2 id="stamp-title">スタンプ</h2>
+    <div class="stamp-row" role="group" aria-labelledby="stamp-color-label">
+      <span id="stamp-color-label">色</span>
+      <button class="btn stamp-color is-on" type="button" data-color="#ff0000" aria-pressed="true"><span class="stamp-swatch" style="background:#ff0000"></span>赤</button>
+      <button class="btn stamp-color" type="button" data-color="#0000ff" aria-pressed="false"><span class="stamp-swatch" style="background:#0000ff"></span>青</button>
+      <button class="btn stamp-color" type="button" data-color="#008000" aria-pressed="false"><span class="stamp-swatch" style="background:#008000"></span>緑</button>
+      <button class="btn stamp-color" type="button" data-color="#000000" aria-pressed="false"><span class="stamp-swatch" style="background:#000000"></span>黒</button>
+    </div>
+    <label class="stamp-row">
+      大きさ
+      <input id="stamp-size" type="range" min="8" max="24" step="1" value="11" aria-label="印の大きさ">
+      <span id="stamp-size-readout">11 pt</span>
+    </label>
+    <div class="stamp-row" role="group" aria-labelledby="stamp-font-label">
+      <span id="stamp-font-label">フォント</span>
+      <button id="stamp-mincho" class="btn is-on" type="button" aria-pressed="true">明朝</button>
+      <button id="stamp-gothic" class="btn" type="button" aria-pressed="false">ゴシック</button>
+    </div>
+    <p id="stamp-sample">甲第１１号証の２</p>
   </dialog>
   <script src="app.js"></script>
 </body>

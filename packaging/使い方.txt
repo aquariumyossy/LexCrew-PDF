@@ -12,6 +12,7 @@
 
 - Windows 64bit
 - Microsoft Edge WebView2 ランタイム
-- 游明朝（yumin.ttf）
+- 游明朝（yumin.ttf）。初期の印に使います
+- ゴシックの印を使うときは游ゴシック（YuGothM.ttc）
 
 証拠 PDF とカードの配置は、この PC のダウンロードフォルダの「LexCrew-PDF-Downloads」に保存されます。生成が終わると、そのフォルダが開きます。アプリのフォルダとは別です。

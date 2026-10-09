@@ -472,7 +472,7 @@ document.getElementById("grayscale").addEventListener("click", async () => {
 document.getElementById("clear").addEventListener("click", async () => {
   if (!api || generating) return;
   const editing = Boolean(view && view.editor);
-  let message = "カードを初期状態に戻します。原本、書名、枝番、追加したカード、ページ順、番号の種類、白黒は消え、甲第１号証から甲第６号証の空のカードになります。生成済みの証拠PDFは残ります。";
+  let message = "カードを初期状態に戻します。原本、書名、枝番、追加したカード、ページ順、番号の種類、白黒、印の色、印の大きさ、印のフォントは消え、甲第１号証から甲第６号証の空のカードになります。生成済みの証拠PDFは残ります。";
   if (editing) message += "開いている編集ウィンドウも閉じます。";
   if (!window.confirm(message)) return;
   const button = document.getElementById("clear");
@@ -507,4 +507,105 @@ help.addEventListener("click", (event) => {
   const inside = event.clientX >= box.left && event.clientX <= box.right
     && event.clientY >= box.top && event.clientY <= box.bottom;
   if (!inside) help.close();
+});
+
+const stampDialog = document.getElementById("stamp-settings");
+const stampColors = [...document.querySelectorAll("#stamp-settings .stamp-color")];
+const stampSize = document.getElementById("stamp-size");
+const stampReadout = document.getElementById("stamp-size-readout");
+const stampSample = document.getElementById("stamp-sample");
+const stampMincho = document.getElementById("stamp-mincho");
+const stampGothic = document.getElementById("stamp-gothic");
+const STAMP_FAMILIES = {
+  mincho: '"Yu Mincho", "YuMincho", "游明朝", serif',
+  gothic: '"Yu Gothic Medium", "Yu Gothic", "游ゴシック", sans-serif',
+};
+
+function chosenStampFont() {
+  return stampGothic.classList.contains("is-on") ? "gothic" : "mincho";
+}
+
+function chosenStampColor() {
+  const chosen = stampColors.find((button) => button.classList.contains("is-on"));
+  return chosen ? chosen.dataset.color : "#ff0000";
+}
+
+function paintStampSample() {
+  const size = Number(stampSize.value);
+  const color = chosenStampColor();
+  const font = chosenStampFont();
+  stampReadout.textContent = `${size} pt`;
+  stampSample.style.color = color;
+  stampSample.style.borderColor = color;
+  stampSample.style.fontSize = `${size}pt`;
+  stampSample.style.borderWidth = `${size / 11}pt`;
+  stampSample.style.fontFamily = STAMP_FAMILIES[font];
+  stampMincho.classList.toggle("is-on", font === "mincho");
+  stampGothic.classList.toggle("is-on", font === "gothic");
+  stampMincho.setAttribute("aria-pressed", font === "mincho" ? "true" : "false");
+  stampGothic.setAttribute("aria-pressed", font === "gothic" ? "true" : "false");
+  stampColors.forEach((button) => {
+    const on = button.dataset.color === color;
+    button.classList.toggle("is-on", on);
+    button.setAttribute("aria-pressed", on ? "true" : "false");
+  });
+}
+
+function fillStampDialog(stamp) {
+  const next = stamp || { color: "#ff0000", size: 11, font: "mincho" };
+  const known = stampColors.some((button) => button.dataset.color === next.color);
+  stampColors.forEach((button) => {
+    button.classList.toggle("is-on", button.dataset.color === (known ? next.color : "#ff0000"));
+  });
+  stampSize.value = String(next.size);
+  stampMincho.classList.toggle("is-on", next.font !== "gothic");
+  stampGothic.classList.toggle("is-on", next.font === "gothic");
+  paintStampSample();
+}
+
+async function saveStamp() {
+  if (!api || !view) return;
+  const color = chosenStampColor();
+  const size = Number(stampSize.value);
+  const font = chosenStampFont();
+  const current = view.stamp || { color: "#ff0000", size: 11, font: "mincho" };
+  if (current.color === color && current.size === size && current.font === font) return;
+  const result = await api.set_stamp_style(color, size, font);
+  if (result && result.ok === false && result.stamp) fillStampDialog(result.stamp);
+  applyView(result);
+}
+
+document.getElementById("stamp-open").addEventListener("click", () => {
+  fillStampDialog(view && view.stamp);
+  stampDialog.showModal();
+});
+document.getElementById("stamp-close").addEventListener("click", () => {
+  stampDialog.close();
+});
+stampDialog.addEventListener("click", (event) => {
+  const box = stampDialog.getBoundingClientRect();
+  const inside = event.clientX >= box.left && event.clientX <= box.right
+    && event.clientY >= box.top && event.clientY <= box.bottom;
+  if (!inside) stampDialog.close();
+});
+stampColors.forEach((button) => {
+  button.addEventListener("click", () => {
+    stampColors.forEach((item) => item.classList.toggle("is-on", item === button));
+    paintStampSample();
+    saveStamp();
+  });
+});
+stampSize.addEventListener("input", paintStampSample);
+stampSize.addEventListener("change", () => { saveStamp(); });
+stampMincho.addEventListener("click", () => {
+  stampGothic.classList.remove("is-on");
+  stampMincho.classList.add("is-on");
+  paintStampSample();
+  saveStamp();
+});
+stampGothic.addEventListener("click", () => {
+  stampMincho.classList.remove("is-on");
+  stampGothic.classList.add("is-on");
+  paintStampSample();
+  saveStamp();
 });

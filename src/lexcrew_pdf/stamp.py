@@ -1,4 +1,4 @@
-"""原本PDFをA4縦へ収め、右上へ赤い証拠番号の枠を入れる。"""
+"""原本PDFをA4縦へ収め、右上へ証拠番号の枠を入れる。"""
 from __future__ import annotations
 
 import math
@@ -9,11 +9,22 @@ from pathlib import Path
 import fitz
 
 STAMP_FONT_SIZE = 11
+STAMP_SIZE_MIN = 8
+STAMP_SIZE_MAX = 24
 STAMP_SAMPLE = "甲第１１号証の２"
 STAMP_MARGIN_PT = 10 * 72 / 25.4
 STAMP_PAD_X = 6
 STAMP_BOX_HEIGHT = 22
 STAMP_COLOR = (1, 0, 0)
+STAMP_FONTS = ("mincho", "gothic")
+# 画面の色ボタンと同じ4色。これ以外の色は印にしない。
+STAMP_PALETTE = (
+    ("赤", "#ff0000", (1.0, 0.0, 0.0)),
+    ("青", "#0000ff", (0.0, 0.0, 1.0)),
+    ("緑", "#008000", (0.0, 128 / 255, 0.0)),
+    ("黒", "#000000", (0.0, 0.0, 0.0)),
+)
+_STAMP_COLOR_BY_HEX = {hex_color: rgb for _label, hex_color, rgb in STAMP_PALETTE}
 # 各辺は載せた画像の 40% まで。向かい合っても中に 20% 残る。
 MAX_EDGE_PERMILLE = 400
 # 右回り。十分の一度。カードの90度とは別に、見ている向きの面内だけ回す。
@@ -85,7 +96,47 @@ def skew_lookup(rows) -> dict[tuple[int, int], int]:
 
 
 class StampFontMissing(FileNotFoundError):
-    """游明朝が無いときは、埋め込まれない代替フォントへ落とさない。"""
+    """指定した印のフォントが無いときは、埋め込まれない代替へ落とさない。"""
+
+
+@dataclass(frozen=True)
+class StampFace:
+    css_family: str
+    missing_generate: str
+    missing_place: str
+
+
+@dataclass(frozen=True)
+class StampStyle:
+    """案件全体の印。色は赤、青、緑、黒。フォントは明朝かゴシック。"""
+
+    color: tuple[float, float, float]
+    size: int
+    font: str
+
+    def __post_init__(self) -> None:
+        if self.color not in _STAMP_COLOR_BY_HEX.values():
+            raise ValueError("色は赤、青、緑、黒から選んでください。")
+        if isinstance(self.size, bool) or not isinstance(self.size, int) or not STAMP_SIZE_MIN <= self.size <= STAMP_SIZE_MAX:
+            raise ValueError("大きさは8から24です。")
+        if self.font not in STAMP_FONTS:
+            raise ValueError("フォントは明朝かゴシックです。")
+
+
+DEFAULT_STAMP = StampStyle(STAMP_COLOR, STAMP_FONT_SIZE, "mincho")
+
+_STAMP_FACE = {
+    "mincho": StampFace(
+        css_family='"Yu Mincho", "YuMincho", "游明朝", serif',
+        missing_generate="游明朝（yumin.ttf）が見つからないため、証拠PDFを生成できません。",
+        missing_place="游明朝（yumin.ttf）が見つからないため、証拠番号の位置を決められません。",
+    ),
+    "gothic": StampFace(
+        css_family='"Yu Gothic Medium", "Yu Gothic", "游ゴシック", sans-serif',
+        missing_generate="游ゴシック（YuGothM.ttc）が見つからないため、このフォントは使えません。",
+        missing_place="游ゴシック（YuGothM.ttc）が見つからないため、証拠番号の位置を決められません。",
+    ),
+}
 
 
 def yu_mincho_path() -> str:
@@ -93,13 +144,91 @@ def yu_mincho_path() -> str:
     return os.path.join(windir, "Fonts", "yumin.ttf")
 
 
+def yu_gothic_path() -> str:
+    windir = os.environ.get("WINDIR", r"C:\Windows")
+    return os.path.join(windir, "Fonts", "YuGothM.ttc")
+
+
+def _stamp_font_path(font: str) -> str:
+    if font == "gothic":
+        return yu_gothic_path()
+    return yu_mincho_path()
+
+
 def require_yu_mincho() -> str:
-    path = yu_mincho_path()
-    if not os.path.isfile(path):
-        raise StampFontMissing(
-            "游明朝（yumin.ttf）が見つからないため、証拠PDFを生成できません。"
-        )
-    return path
+    return require_stamp_font(DEFAULT_STAMP)
+
+
+def require_stamp_font(style: StampStyle | None = None, *, placing: bool = False) -> str:
+    chosen = style or DEFAULT_STAMP
+    path = _stamp_font_path(chosen.font)
+    if os.path.isfile(path):
+        return path
+    face = _STAMP_FACE[chosen.font]
+    message = face.missing_place if placing else face.missing_generate
+    raise StampFontMissing(message)
+
+
+def color_hex(color: tuple[float, float, float]) -> str:
+    return "#" + "".join(f"{round(channel * 255):02x}" for channel in color)
+
+
+def stamp_style_from_json(raw) -> StampStyle:
+    """配置ファイルの stamp。無い項目は初期値。壊れていれば配置全体を拒む。"""
+    if raw is None:
+        return DEFAULT_STAMP
+    if not isinstance(raw, dict):
+        raise ValueError("配置ファイルを読めません。")
+    try:
+        color = _hex_color(raw["color"]) if "color" in raw else DEFAULT_STAMP.color
+        size = _stamp_size(raw["size"]) if "size" in raw else DEFAULT_STAMP.size
+        font = _stamp_font(raw["font"]) if "font" in raw else DEFAULT_STAMP.font
+    except (TypeError, ValueError):
+        raise ValueError("配置ファイルを読めません。") from None
+    return StampStyle(color, size, font)
+
+
+def stamp_style_from_request(color, size, font) -> StampStyle:
+    return StampStyle(_hex_color(color), _stamp_size(size), _stamp_font(font))
+
+
+def stamp_record(style: StampStyle) -> dict | None:
+    if style == DEFAULT_STAMP:
+        return None
+    return {"color": color_hex(style.color), "size": style.size, "font": style.font}
+
+
+def stamp_view(style: StampStyle) -> dict:
+    return {"color": color_hex(style.color), "size": style.size, "font": style.font}
+
+
+def _hex_color(value) -> tuple[float, float, float]:
+    if not isinstance(value, str):
+        raise ValueError("色は赤、青、緑、黒から選んでください。")
+    color = _STAMP_COLOR_BY_HEX.get(value.strip().lower())
+    if color is None:
+        raise ValueError("色は赤、青、緑、黒から選んでください。")
+    return color
+
+
+def _stamp_size(value) -> int:
+    if isinstance(value, bool):
+        raise ValueError("大きさは8から24です。")
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    if isinstance(value, int) and STAMP_SIZE_MIN <= value <= STAMP_SIZE_MAX:
+        return value
+    raise ValueError("大きさは8から24です。")
+
+
+def _stamp_font(value) -> str:
+    if value not in STAMP_FONTS:
+        raise ValueError("フォントは明朝かゴシックです。")
+    return value
+
+
+def _chosen_style(style: StampStyle | None) -> StampStyle:
+    return style or DEFAULT_STAMP
 
 
 def open_source(path: str):
@@ -231,6 +360,7 @@ def stamp_sources_to_pdf(
     masks=(),
     trims: dict[tuple[int, int, int], PageTrim] | None = None,
     skews: dict[tuple[int, int], int] | None = None,
+    style: StampStyle | None = None,
 ) -> bytes:
     """原本を順にA4縦へ載せる。証拠番号は出力の1ページ目だけに押す。
 
@@ -241,11 +371,13 @@ def stamp_sources_to_pdf(
     masks は原本ページ上の矩形。載せたあとに墨消し、そのあとで印を押す。
     trims は (原本, ページ, 部分) ごとの四辺。端はクリップで落とし、中身は拡大しない。
     skews は (原本, ページ) ごとの右回り十分の一度。分割した左右は同じ角度。印は回さない。
+    style を省いたときは赤、11 ポイント、明朝。
     """
     if not source_paths:
         raise ValueError("原本がありません。")
-    font_path = require_yu_mincho()
-    box_w, box_h = _stamp_box(font_path)
+    chosen = _chosen_style(style)
+    font_path = require_stamp_font(chosen)
+    box_w, box_h = _stamp_box(font_path, chosen)
     output = fitz.open()
     try:
         placed = 0
@@ -263,7 +395,7 @@ def stamp_sources_to_pdf(
                 limit=limit, skew_tenths=skew_tenths,
             )
             if placed == 0:
-                _draw_stamp(page, label, font_path, box_w, box_h, stamp_dx, stamp_dy)
+                _draw_stamp(page, label, font_path, box_w, box_h, stamp_dx, stamp_dy, chosen)
             placed += 1
 
         _for_each_placement(source_paths, split, pages, place)
@@ -290,12 +422,14 @@ def render_stamped_page_jpeg(
     masks=(),
     trims: dict[tuple[int, int, int], PageTrim] | None = None,
     skews: dict[tuple[int, int], int] | None = None,
+    style: StampStyle | None = None,
 ) -> bytes:
     """指定ページだけを印字してJPEGにする。甲号証フォルダへは書かない。"""
     if page_index < 0:
         raise IndexError("ページがありません。")
-    font_path = require_yu_mincho()
-    box_w, box_h = _stamp_box(font_path)
+    chosen = _chosen_style(style)
+    font_path = require_stamp_font(chosen)
+    box_w, box_h = _stamp_box(font_path, chosen)
     output = fitz.open()
     try:
         seen = 0
@@ -316,7 +450,7 @@ def render_stamped_page_jpeg(
                 limit=limit, skew_tenths=skew_tenths,
             )
             if page_index == 0 and draw_stamp:
-                _draw_stamp(page, label, font_path, box_w, box_h, stamp_dx, stamp_dy)
+                _draw_stamp(page, label, font_path, box_w, box_h, stamp_dx, stamp_dy, chosen)
             raise _PageFound
 
         try:
@@ -652,7 +786,7 @@ def _place_page(
                 rotate=rotate,
             )
     if grayscale:
-        # 印はこのあと赤で描く。原本の Document はここでは変換しない。
+        # 印はこのあと選んだ色で描く。ここでグレーにしても印はグレーにしない。
         page.recolor(1)
     return page, limit
 
@@ -818,10 +952,12 @@ def a4_points() -> tuple[float, float]:
     return float(page.width), float(page.height)
 
 
-def _stamp_box(font_path: str) -> tuple[float, float]:
+def _stamp_box(font_path: str, style: StampStyle | None = None) -> tuple[float, float]:
+    chosen = _chosen_style(style)
+    scale = chosen.size / STAMP_FONT_SIZE
     font = fitz.Font(fontfile=font_path)
-    width = font.text_length(STAMP_SAMPLE, fontsize=STAMP_FONT_SIZE)
-    return width + STAMP_PAD_X * 2, STAMP_BOX_HEIGHT
+    width = font.text_length(STAMP_SAMPLE, fontsize=chosen.size)
+    return width + STAMP_PAD_X * scale * 2, STAMP_BOX_HEIGHT * scale
 
 
 def clamp_stamp_offset(dx: int, dy: int, *, box_w: float, box_h: float) -> tuple[int, int, float, float, float, float]:
@@ -848,13 +984,14 @@ def clamp_stamp_offset(dx: int, dy: int, *, box_w: float, box_h: float) -> tuple
     )
 
 
-def stamp_frame(dx: int = 0, dy: int = 0) -> dict | None:
-    """編集画面がつまみを置くための枠。游明朝が無いときは None。"""
+def stamp_frame(dx: int = 0, dy: int = 0, style: StampStyle | None = None) -> dict | None:
+    """編集画面がつまみを置くための枠。選んだフォントが無いときは None。"""
+    chosen = _chosen_style(style)
     try:
-        font_path = require_yu_mincho()
+        font_path = require_stamp_font(chosen)
     except StampFontMissing:
         return None
-    box_w, box_h = _stamp_box(font_path)
+    box_w, box_h = _stamp_box(font_path, chosen)
     page = _a4()
     clamped_dx, clamped_dy, origin_x, origin_y, x, y = clamp_stamp_offset(
         dx,
@@ -873,6 +1010,11 @@ def stamp_frame(dx: int = 0, dy: int = 0) -> dict | None:
         "y": float(y),
         "dx": clamped_dx,
         "dy": clamped_dy,
+        "color": color_hex(chosen.color),
+        "fontSize": chosen.size,
+        "font": chosen.font,
+        "borderWidth": chosen.size / STAMP_FONT_SIZE,
+        "fontFamily": _STAMP_FACE[chosen.font].css_family,
     }
 
 
@@ -881,20 +1023,30 @@ def _stamp_rect(box_w: float, box_h: float, dx: int, dy: int) -> fitz.Rect:
     return fitz.Rect(x, y, x + box_w, y + box_h)
 
 
-def _draw_stamp(page, label: str, font_path: str, box_w: float, box_h: float, dx: int = 0, dy: int = 0) -> None:
+def _draw_stamp(
+    page,
+    label: str,
+    font_path: str,
+    box_w: float,
+    box_h: float,
+    dx: int = 0,
+    dy: int = 0,
+    style: StampStyle | None = None,
+) -> None:
+    chosen = _chosen_style(style)
     rect = _stamp_rect(box_w, box_h, dx, dy)
-    page.draw_rect(rect, color=STAMP_COLOR, width=1.0)
+    page.draw_rect(rect, color=chosen.color, width=chosen.size / STAMP_FONT_SIZE)
     page.insert_font(fontname=_FONT_NAME, fontfile=font_path)
     font = fitz.Font(fontfile=font_path)
-    ascender = font.ascender * STAMP_FONT_SIZE
-    descender = font.descender * STAMP_FONT_SIZE
+    ascender = font.ascender * chosen.size
+    descender = font.descender * chosen.size
     text_height = ascender - descender
     baseline = rect.y0 + (rect.height - text_height) / 2 + ascender
-    text_width = font.text_length(label, fontsize=STAMP_FONT_SIZE)
+    text_width = font.text_length(label, fontsize=chosen.size)
     page.insert_text(
         fitz.Point(rect.x0 + (rect.width - text_width) / 2, baseline),
         label,
         fontname=_FONT_NAME,
-        fontsize=STAMP_FONT_SIZE,
-        color=STAMP_COLOR,
+        fontsize=chosen.size,
+        color=chosen.color,
     )

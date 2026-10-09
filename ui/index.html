@@ -109,7 +109,114 @@
       background: #fff0f1;
       color: var(--danger);
     }
-    #generate { margin-left: auto; }
+    .header-actions {
+      margin-left: auto;
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+    #help {
+      width: min(40rem, calc(100% - 32px));
+      max-height: 80vh;
+      margin: auto;
+      padding: 16px 18px 16px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #fff;
+      color: var(--text);
+      font: inherit;
+      overflow: hidden;
+      box-shadow: 0 8px 24px rgba(26, 36, 56, 0.12);
+    }
+    #help[open] {
+      display: flex;
+      flex-direction: column;
+    }
+    #help::backdrop { background: rgba(26, 36, 56, 0.35); }
+    .help-bar {
+      display: flex;
+      flex: none;
+      justify-content: flex-end;
+      margin: 0 0 12px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid var(--line);
+    }
+    .help-body {
+      min-height: 0;
+      overflow: auto;
+      padding-right: 6px;
+      line-height: 1.65;
+      scrollbar-gutter: stable;
+    }
+    .help-body > h2:first-child { margin-top: 0; }
+    #help h2 {
+      margin: 22px 0 10px;
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--accent);
+    }
+    #help .steps,
+    #help .notes,
+    #help .oss {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+    #help .steps { counter-reset: step; }
+    #help .steps li,
+    #help .notes li {
+      margin: 0 0 8px;
+      padding: 9px 12px;
+      background: #f7f9fc;
+      line-height: 1.65;
+    }
+    #help .steps li {
+      counter-increment: step;
+      position: relative;
+      padding-left: 38px;
+      border-radius: 8px;
+    }
+    #help .steps li::before {
+      content: counter(step);
+      position: absolute;
+      left: 10px;
+      top: 11px;
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: #e7f0ff;
+      color: var(--accent);
+      font-size: 11px;
+      font-weight: 700;
+      line-height: 18px;
+      text-align: center;
+    }
+    #help .notes li {
+      border-left: 3px solid #c5d7f5;
+      border-radius: 0 8px 8px 0;
+    }
+    #help .credit {
+      margin: 0;
+      padding: 10px 12px;
+      background: #f7f9fc;
+      border-radius: 8px;
+      font-weight: 700;
+    }
+    #help .oss li {
+      display: grid;
+      gap: 2px;
+      margin: 0 0 6px;
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }
+    #help .oss-name { font-size: 13px; font-weight: 700; }
+    #help .oss-meta { color: var(--muted); font-size: 12px; line-height: 1.45; }
+    #grayscale.is-on {
+      border-color: #72a0eb;
+      background: #d6e4ff;
+      color: var(--accent);
+    }
     #output { flex: 1 1 220px; margin: 0; font-size: 12px; color: var(--muted); }
     #banner { margin: 0 16px 10px; font-size: 13px; }
     #cards {
@@ -277,10 +384,59 @@
       </ul>
     </div>
     <p id="output"></p>
-    <button id="generate" class="btn primary" type="button">証拠PDFを生成</button>
+    <div class="header-actions">
+      <button id="help-open" class="btn" type="button">使い方</button>
+      <button id="clear" class="btn danger" type="button">クリア</button>
+      <button id="grayscale" class="btn" type="button" aria-pressed="false">白黒</button>
+      <button id="generate" class="btn primary" type="button">証拠PDFを生成</button>
+    </div>
   </header>
   <p id="banner" hidden></p>
   <main id="cards"></main>
+  <dialog id="help" aria-labelledby="help-title">
+    <div class="help-bar">
+      <button id="help-close" class="btn" type="button">閉じる</button>
+    </div>
+    <div class="help-body">
+    <h2 id="help-title">使い方</h2>
+    <ol class="steps">
+      <li>起動すると、保存されたカードがあればそれを出します。無ければ甲第１号証から甲第６号証までの空のカードが6枚出ます。</li>
+      <li>ヘッダーの欄で番号の形を選びます。選べるのは甲第N号証、乙第N号証、丙第N号証、疎甲第N号証、疎乙第N号証、疎丙第N号証、別紙N、資料Nです。</li>
+      <li>PDF の無いカードは、中央の「ファイルを追加」で足します。カードへドロップしても足せます。ファイルがあるカードは「差替」と「右に90°」を使います。サムネイルへ別の PDF をドロップすると差替になります。</li>
+      <li>「枝番」を押すと、の１、の２が別のカードになります。ページの無い枝番は PDF を出しません。</li>
+      <li>末尾の「カードを追加」で次の番号を足します。「削除」でそのカードを消すと、後ろの番号が詰まります。右下のつまみで順番を変えると、証拠番号、印、ファイル名が付いて変わります。</li>
+      <li>書名が空のときは、そのカードへ最初に足した PDF のファイル名から拡張子を除いた名前を使います。</li>
+      <li>A3 の見開きには「A4分割」が出ます。左から右へ A4 にします。</li>
+      <li>サムネイルをクリックすると編集ウィンドウが開きます。編集中のカードは、メイン画面で差替、回転、削除ができません。</li>
+      <li>「証拠PDFを生成」で、ダウンロードフォルダの「LexCrew-PDF-Downloads」に印付き PDF を書きます。1件以上書けたときは、そのフォルダをエクスプローラーで開きます。ヘッダーに保存先が出ます。カードを変えるたびに、同じフォルダの layout.json を上書きします。原本の PDF はコピーしません。</li>
+      <li>「白黒」を押すと、載せたページを灰色にしてから赤い印を押します。</li>
+      <li>「クリア」はカードを起動直後の6枚に戻します。生成済みの証拠 PDF は残ります。</li>
+    </ol>
+    <h2>ページ編集</h2>
+    <ul class="notes">
+      <li>左に出すページが並びます。ドラッグで順番を変えます。右肩の X で外します。最後の1枚は外せません。</li>
+      <li>「元に戻す」で、その枝番のページ順を原本に戻します。削りと傾きは残ります。</li>
+      <li>「マスキング」でページ上をドラッグすると、その範囲を黒く覆います。生成した PDF では、その範囲の文字と画像は戻りません。右上の X で外せます。</li>
+      <li>見ているページの四辺をドラッグすると、その端を 1% 刻みで最大 40% まで削れます。中身は拡大せず、同じ位置に残ります。「トリムクリア」でそのページの削りを戻します。</li>
+      <li>◁ ▷ で、見ているページを 0.1 度ずつ、左右に最大 10 度まで傾けます。押し続けているあいだは画面上だけが回り、離すと保存されます。印は回りません。傾きの表示をダブルクリックすると 0 度に戻ります。A4分割を切り替えると傾きは消えます。</li>
+      <li>1ページ目の赤い印はドラッグで動かせます。2ページ目以降には付きません。</li>
+    </ul>
+    <h2>クレジット</h2>
+    <p class="credit">開発者　弁護士　吉田秀平</p>
+    <h2>使用しているソフトウェア</h2>
+    <ul class="oss">
+      <li><span class="oss-name">PyMuPDF 1.28.2</span><span class="oss-meta">GNU Affero General Public License v3.0、または Artifex の商用ライセンス。Copyright Artifex。</span></li>
+      <li><span class="oss-name">pywebview 6.2.1</span><span class="oss-meta">BSD 3-Clause。Copyright (c) 2014-2017, Roman Sirokov。</span></li>
+      <li><span class="oss-name">bottle 0.13.4</span><span class="oss-meta">MIT。Copyright (c) 2009-2024, Marcel Hellkamp。</span></li>
+      <li><span class="oss-name">proxy_tools 0.1.0</span><span class="oss-meta">MIT。Jonathan Tushman。</span></li>
+      <li><span class="oss-name">typing_extensions 4.16.0</span><span class="oss-meta">Python Software Foundation License 2.0。</span></li>
+      <li><span class="oss-name">pythonnet 3.2.0</span><span class="oss-meta">MIT。The Contributors of the Python.NET Project。</span></li>
+      <li><span class="oss-name">clr_loader 0.3.1</span><span class="oss-meta">MIT。Copyright (c) 2019-2026 Benedikt Reinartz。</span></li>
+      <li><span class="oss-name">cffi 2.1.1</span><span class="oss-meta">MIT-0。Armin Rigo, Maciej Fijalkowski。</span></li>
+      <li><span class="oss-name">pycparser 3.0</span><span class="oss-meta">BSD 3-Clause。Eli Bendersky。</span></li>
+    </ul>
+    </div>
+  </dialog>
   <script src="app.js"></script>
 </body>
 </html>

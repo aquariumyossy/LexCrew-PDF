@@ -4,3 +4,6 @@ __pycache__/
 *.egg-info/
 _boot.txt
 _boot_err.txt
+dist/
+packaging/cache/
+引継ぎ.md

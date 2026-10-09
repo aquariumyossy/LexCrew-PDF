@@ -1,5 +1,6 @@
 """窓が呼ぶ Python API。ブラウザは使わない。"""
 import base64
+import json
 import os
 import subprocess
 import sys
@@ -129,7 +130,7 @@ def test_generate_skips_empty_cards(tmp_path):
     session = Session(tmp_path)
     session.add_file(1, 0, str(source))
     result = session.generate()
-    written = list((tmp_path / "証拠").glob("*.pdf"))
+    written = list((tmp_path / "LexCrew-PDF-Downloads").glob("*.pdf"))
     assert len(written) == 1
     assert written[0].name.startswith("甲001：")
     assert result["ok"] is True
@@ -150,6 +151,106 @@ def test_reload_restores_cards(tmp_path):
     assert card["slots"][0]["files"][0]["name"] == "契約書.pdf"
 
 
+def test_clear_restores_the_initial_cards_and_keeps_generated_pdfs(tmp_path):
+    _require_font()
+    source = tmp_path / "契約書.pdf"
+    _pdf(source, ("ONE", "TWO"))
+    session = Session(tmp_path)
+    session.add_file(1, 0, str(source))
+    session.set_title(1, "賃貸借")
+    session.set_pages(1, [
+        {"source": 0, "page": 1, "part": 0, "group": 1},
+        {"source": 0, "page": 0, "part": 0, "group": 0},
+    ])
+    session.add_branch(2)
+    session.add_card()
+    session.set_series("乙")
+    session.add_series_choice()
+    session.set_grayscale(True)
+    session.notice = "フォルダを確認できません。"
+    generated = session.generate()
+    assert generated["ok"] is True
+    written = list((tmp_path / "LexCrew-PDF-Downloads").glob("*.pdf"))
+    assert len(written) == 1
+    session.card_errors[1] = "原本を開けません。"
+    session.begin_edit(1, 0)
+
+    view = session.clear()
+    assert [card["number"] for card in view["cards"]] == [1, 2, 3, 4, 5, 6]
+    assert all(len(card["slots"]) == 1 and card["slots"][0]["files"] == [] for card in view["cards"])
+    assert all(card["slots"][0]["title"] == "" and card["message"] == "" for card in view["cards"])
+    assert view["cards"][0]["label"] == "甲第１号証"
+    assert view["series"] == "甲"
+    assert view["labelTemplate"] == "甲第N号証"
+    assert view["enabledSeries"] == ["甲", "乙", "丙"]
+    assert view["grayscale"] is False
+    assert view["editor"] is None
+    assert view["message"] == "フォルダを確認できません。"
+    assert view["outputDir"] == str(tmp_path / "LexCrew-PDF-Downloads")
+    assert session.layout.cards[0].pages is None
+    assert session.layout.last_written == ()
+    assert written[0].is_file()
+
+    reloaded = Session(tmp_path)
+    assert [card["number"] for card in reloaded.view()["cards"]] == [1, 2, 3, 4, 5, 6]
+    assert all(not card["hasFile"] for card in reloaded.view()["cards"])
+    assert reloaded.layout.last_written == ()
+    assert reloaded.layout.grayscale is False
+
+    session.generate()
+    assert written[0].is_file()
+
+
+class _EditorWindow:
+    def __init__(self, closed: bool) -> None:
+        self.events = type("Events", (), {})()
+        self.events.closed = type("Flag", (), {"is_set": staticmethod(lambda: closed)})()
+        self.destroyed = False
+
+    def destroy(self) -> None:
+        self.destroyed = True
+
+
+def test_closed_editor_cannot_rewrite_pages_and_clear_closes_it(tmp_path):
+    source = tmp_path / "契約書.pdf"
+    _pdf(source, ("ONE", "TWO"))
+    session = Session(tmp_path)
+    session.add_file(1, 0, str(source))
+    session.set_pages(1, [
+        {"source": 0, "page": 1, "part": 0, "group": 1},
+        {"source": 0, "page": 0, "part": 0, "group": 0},
+    ])
+    kept = session.layout.cards[0].pages
+    api = app_window.Api(session)
+    editor = app_window.EditorApi(session, api)
+    editor.set_pages(1, 0, [
+        {"source": 0, "page": 0, "part": 0, "group": 1},
+        {"source": 0, "page": 1, "part": 0, "group": 0},
+    ])
+    editor.reset_pages(1, 0)
+    assert session.layout.cards[0].pages == kept
+
+    window = _EditorWindow(closed=False)
+    api._editor_window = window
+    session.begin_edit(1, 0)
+    editor.set_pages(1, 0, [
+        {"source": 0, "page": 0, "part": 0, "group": 1},
+        {"source": 0, "page": 1, "part": 0, "group": 0},
+    ])
+    assert session.layout.cards[0].pages != kept
+    view = api.clear()
+    assert window.destroyed is True
+    assert api._editor_window is None
+    assert api._closing is False
+    assert [card["number"] for card in view["cards"]] == [1, 2, 3, 4, 5, 6]
+    assert session.layout.cards[0].pages is None
+    editor.set_pages(1, 0, [
+        {"source": 0, "page": 1, "part": 0, "group": 1},
+        {"source": 0, "page": 0, "part": 0, "group": 0},
+    ])
+    assert session.layout.cards[0].pages is None
+
+
 def test_page_edit_changes_generate_order(tmp_path):
     _require_font()
     source = tmp_path / "two.pdf"
@@ -161,7 +262,7 @@ def test_page_edit_changes_generate_order(tmp_path):
         {"source": 0, "page": 0, "part": 0, "group": 0},
     ])
     session.generate()
-    document = fitz.open(tmp_path / "証拠" / "甲001：two.pdf")
+    document = fitz.open(tmp_path / "LexCrew-PDF-Downloads" / "甲001：two.pdf")
     try:
         assert "SECONDPAGE" in document[0].get_text("text")
         assert document.page_count == 1
@@ -189,6 +290,37 @@ def test_replace_clears_pages_and_add_keeps_them(tmp_path):
     assert session.layout.cards[0].pages is None
 
 
+def test_rotated_landscape_a4_is_splittable_and_generate_doubles_pages(tmp_path):
+    _require_font()
+    source = tmp_path / "spread.pdf"
+    document = fitz.open()
+    for _page in range(2):
+        page = document.new_page(width=595, height=842)
+        page.set_rotation(90)
+        left = fitz.Point(36, 80) * ~page.rotation_matrix
+        right = fitz.Point(page.rect.width - 150, 80) * ~page.rotation_matrix
+        page.insert_text(left, "LEFTSIDE")
+        page.insert_text(right, "RIGHTSIDE")
+    document.save(source)
+    document.close()
+    session = Session(tmp_path)
+    session.add_file(1, 0, str(source))
+    before = session.media(1)
+    assert before["splittable"] is True
+    assert before["slots"][0]["pageCount"] == 2
+    session.set_split(1, True)
+    session.generate()
+    document = fitz.open(tmp_path / "LexCrew-PDF-Downloads" / "甲001：spread.pdf")
+    try:
+        assert document.page_count == 4
+        assert "LEFTSIDE" in document[0].get_text("text")
+        assert "RIGHTSIDE" not in document[0].get_text("text")
+        assert "RIGHTSIDE" in document[1].get_text("text")
+        assert "LEFTSIDE" not in document[1].get_text("text")
+    finally:
+        document.close()
+
+
 def test_split_toggle_resets_only_when_the_value_changes(tmp_path):
     source = tmp_path / "a.pdf"
     _pdf(source, ("A", "B"))
@@ -209,7 +341,7 @@ def test_missing_font_on_generate_keeps_previous_output(tmp_path, monkeypatch):
     _pdf(source, ("A",))
     session = Session(tmp_path)
     session.add_file(1, 0, str(source))
-    dest = tmp_path / "証拠" / "甲001：a.pdf"
+    dest = tmp_path / "LexCrew-PDF-Downloads" / "甲001：a.pdf"
     dest.write_bytes(b"stay")
     session.layout = session.layout.__class__(
         series=session.layout.series,
@@ -226,12 +358,12 @@ def test_missing_font_on_generate_keeps_previous_output(tmp_path, monkeypatch):
 
 
 def test_broken_layout_keeps_the_cards(tmp_path):
-    evidence = tmp_path / "証拠"
+    evidence = tmp_path / "LexCrew-PDF-Downloads"
     evidence.mkdir()
     (evidence / "layout.json").write_text("{", encoding="utf-8")
     view = Session(tmp_path).view()
     assert view["message"] == "配置ファイルを読めません。"
-    assert view["outputDir"] == str(tmp_path / "証拠")
+    assert view["outputDir"] == str(tmp_path / "LexCrew-PDF-Downloads")
     assert [card["number"] for card in view["cards"]] == [1, 2, 3, 4, 5, 6]
 
 
@@ -287,7 +419,7 @@ def test_preview_works_before_a_folder_is_chosen(tmp_path):
 def test_layout_save_does_not_leave_a_writing_file(tmp_path):
     session = Session(tmp_path)
     session.set_title(1, "契約")
-    evidence = tmp_path / "証拠"
+    evidence = tmp_path / "LexCrew-PDF-Downloads"
     assert (evidence / "layout.json").is_file()
     assert not (evidence / "layout.json.writing").exists()
 
@@ -664,11 +796,193 @@ def test_downloads_dir_is_this_pc_download_folder():
 
 
 def test_boot_uses_the_download_folder(monkeypatch, tmp_path):
+    monkeypatch.delenv("LEXCREW_FOLDER", raising=False)
     monkeypatch.setattr(app_window, "downloads_dir", lambda: tmp_path)
     session = app_window.boot()
     assert session.folder == tmp_path
-    assert session.view()["outputDir"] == str(tmp_path / "証拠")
+    assert session.view()["outputDir"] == str(tmp_path / "LexCrew-PDF-Downloads")
     assert [card["number"] for card in session.view()["cards"]] == [1, 2, 3, 4, 5, 6]
+
+
+def test_boot_uses_lexcrew_folder_when_set(monkeypatch, tmp_path):
+    chosen = tmp_path / "chosen"
+    chosen.mkdir()
+    monkeypatch.setenv("LEXCREW_FOLDER", str(chosen))
+    monkeypatch.setattr(app_window, "downloads_dir", lambda: tmp_path / "downloads")
+    session = app_window.boot()
+    assert session.folder == chosen
+    assert session.view()["outputDir"] == str(chosen / "LexCrew-PDF-Downloads")
+
+
+def _write_layout(folder: Path, title: str) -> None:
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "layout.json").write_text(
+        json.dumps({
+            "series": "甲",
+            "labelTemplate": "甲第N号証",
+            "enabledSeries": ["甲", "乙", "丙"],
+            "cards": [{"number": 1, "slots": [{"title": title, "files": []}]}],
+            "lastWritten": [],
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def test_legacy_output_folder_is_renamed_on_startup(tmp_path):
+    legacy = tmp_path / "証拠"
+    _write_layout(legacy, "引き継ぎ")
+    (legacy / "甲001：引き継ぎ.pdf").write_bytes(b"stay")
+    session = Session(tmp_path)
+    current = tmp_path / "LexCrew-PDF-Downloads"
+    assert not legacy.exists()
+    assert (current / "甲001：引き継ぎ.pdf").read_bytes() == b"stay"
+    assert session.layout.cards[0].slots[0].title == "引き継ぎ"
+    assert session.view()["outputDir"] == str(current)
+    again = Session(tmp_path)
+    assert again.layout.cards[0].slots[0].title == "引き継ぎ"
+    assert not legacy.exists()
+
+
+def test_legacy_folder_stays_when_the_new_folder_exists(tmp_path):
+    legacy = tmp_path / "証拠"
+    current = tmp_path / "LexCrew-PDF-Downloads"
+    _write_layout(legacy, "古い")
+    _write_layout(current, "新しい")
+    session = Session(tmp_path)
+    assert legacy.is_dir()
+    assert json.loads((legacy / "layout.json").read_text(encoding="utf-8"))["cards"][0]["slots"][0]["title"] == "古い"
+    assert session.layout.cards[0].slots[0].title == "新しい"
+
+
+def test_mistaken_output_folder_is_renamed(tmp_path):
+    legacy = tmp_path / "LexCrew-PDF"
+    _write_layout(legacy, "直前")
+    (legacy / "甲001：直前.pdf").write_bytes(b"pdf")
+    session = Session(tmp_path)
+    dest = tmp_path / "LexCrew-PDF-Downloads"
+    assert not legacy.exists()
+    assert (dest / "甲001：直前.pdf").read_bytes() == b"pdf"
+    assert session.layout.cards[0].slots[0].title == "直前"
+
+
+def test_application_folder_keeps_its_name_and_outputs_move_out(tmp_path):
+    app = tmp_path / "LexCrew-PDF"
+    app.mkdir()
+    (app / "LexCrew-PDF.bat").write_text("@echo off\r\n", encoding="utf-8")
+    (app / "原本.pdf").write_bytes(b"src")
+    (app / "layout.json").write_text(
+        json.dumps({
+            "series": "甲",
+            "labelTemplate": "甲第N号証",
+            "enabledSeries": ["甲", "乙", "丙"],
+            "cards": [{"number": 1, "slots": [{"title": "アプリ内", "files": []}]}],
+            "lastWritten": ["甲001：アプリ内.pdf"],
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (app / "甲001：アプリ内.pdf").write_bytes(b"out")
+    session = Session(tmp_path)
+    dest = tmp_path / "LexCrew-PDF-Downloads"
+    assert (app / "LexCrew-PDF.bat").is_file()
+    assert (app / "原本.pdf").read_bytes() == b"src"
+    assert not (app / "layout.json").exists()
+    assert not (app / "甲001：アプリ内.pdf").exists()
+    assert (dest / "甲001：アプリ内.pdf").read_bytes() == b"out"
+    assert session.layout.cards[0].slots[0].title == "アプリ内"
+
+
+def test_failed_rename_keeps_the_legacy_folder(tmp_path, monkeypatch):
+    legacy = tmp_path / "証拠"
+    _write_layout(legacy, "残す")
+
+    def boom(self, target):
+        raise OSError("busy")
+
+    monkeypatch.setattr(Path, "rename", boom)
+    session = Session(tmp_path)
+    assert session.notice == "保存先を LexCrew-PDF-Downloads に移せません。"
+    assert legacy.is_dir()
+    assert not (tmp_path / "LexCrew-PDF-Downloads").exists()
+    assert [card.number for card in session.layout.cards] == [1, 2, 3, 4, 5, 6]
+    assert session.layout.cards[0].slots[0].title == ""
+
+
+def test_generate_opens_the_output_folder(tmp_path, monkeypatch):
+    _require_font()
+    opened = []
+    monkeypatch.setattr(app_window.os, "startfile", lambda path: opened.append(Path(path)))
+    source = tmp_path / "契約書.pdf"
+    _pdf(source, ("BODY",))
+    session = Session(tmp_path)
+    session.add_file(1, 0, str(source))
+    result = app_window.Api(session).generate()
+    assert result["ok"] is True
+    assert opened == [tmp_path / "LexCrew-PDF-Downloads"]
+
+
+def test_generate_opens_the_folder_when_some_files_fail(tmp_path, monkeypatch):
+    opened = []
+    monkeypatch.setattr(app_window.os, "startfile", lambda path: opened.append(Path(path)))
+    session = Session(tmp_path)
+    output = tmp_path / "LexCrew-PDF-Downloads"
+
+    def partial():
+        return {
+            "ok": False,
+            "written": [{"filename": "甲001：a.pdf"}],
+            "outputDir": str(output),
+            "message": "一部は保存できませんでした。",
+        }
+
+    monkeypatch.setattr(session, "generate", partial)
+    result = app_window.Api(session).generate()
+    assert result["ok"] is False
+    assert opened == [output]
+
+
+def test_generate_does_not_open_the_folder_when_nothing_is_written(tmp_path, monkeypatch):
+    _require_font()
+    opened = []
+    monkeypatch.setattr(app_window.os, "startfile", lambda path: opened.append(path))
+    result = app_window.Api(Session(tmp_path)).generate()
+    assert result["written"] == []
+    assert opened == []
+
+
+def test_generate_does_not_open_the_folder_when_the_font_is_missing(tmp_path, monkeypatch):
+    opened = []
+    monkeypatch.setattr(app_window.os, "startfile", lambda path: opened.append(path))
+    source = tmp_path / "a.pdf"
+    _pdf(source, ("A",))
+    session = Session(tmp_path)
+    session.add_file(1, 0, str(source))
+    monkeypatch.setattr("lexcrew_pdf.stamp.yu_mincho_path", lambda: str(tmp_path / "missing.ttf"))
+    result = app_window.Api(session).generate()
+    assert result["ok"] is False
+    assert opened == []
+
+
+def test_generate_returns_when_the_folder_cannot_open(tmp_path, monkeypatch):
+    _require_font()
+
+    def fail(path):
+        raise OSError("busy")
+
+    monkeypatch.setattr(app_window.os, "startfile", fail)
+    source = tmp_path / "契約書.pdf"
+    _pdf(source, ("BODY",))
+    session = Session(tmp_path)
+    session.add_file(1, 0, str(source))
+    result = app_window.Api(session).generate()
+    assert result["ok"] is True
+    assert "保存しました" in result["message"]
+
+
+def test_boot_ignores_blank_lexcrew_folder(monkeypatch, tmp_path):
+    monkeypatch.setenv("LEXCREW_FOLDER", "  ")
+    monkeypatch.setattr(app_window, "downloads_dir", lambda: tmp_path)
+    session = app_window.boot()
+    assert session.folder == tmp_path
 
 
 def test_startup_view_is_under_the_budget():

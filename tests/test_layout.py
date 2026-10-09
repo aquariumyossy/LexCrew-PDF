@@ -1,13 +1,26 @@
 """配置ファイルと、カードからの生成計画。"""
 import json
+import os
+from dataclasses import replace
 from pathlib import Path
 
 import fitz
 import pytest
 
-from lexcrew_pdf.layout import default_layout, layout_to_json, load_layout, parse_layout, save_layout, store_path
+from lexcrew_pdf.layout import (
+    default_layout,
+    layout_to_json,
+    load_layout,
+    parse_layout,
+    save_layout,
+    store_path,
+    with_next_series,
+    with_series,
+)
 from lexcrew_pdf.plan import jobs_from_layout
 from lexcrew_pdf.session import Session
+from lexcrew_pdf.stamp import stamp_frame, stamp_sources_to_pdf, yu_mincho_path
+from lexcrew_pdf.write import write_jobs
 
 
 def _pdf(path: Path, text: str = "PAGE") -> None:
@@ -31,7 +44,7 @@ def test_layout_round_trip(tmp_path):
     loaded = load_layout(tmp_path)
     assert loaded == session.layout
     assert loaded.cards[1].slots[0].title == "契約書"
-    raw = json.loads((tmp_path / "証拠" / "layout.json").read_text(encoding="utf-8"))
+    raw = json.loads((tmp_path / "LexCrew-PDF-Downloads" / "layout.json").read_text(encoding="utf-8"))
     assert "title" not in raw["cards"][1]
     assert raw["cards"][1]["slots"][0]["title"] == "契約書"
 
@@ -152,7 +165,7 @@ def test_natural_pages_are_omitted_from_json(tmp_path):
     _pdf(source)
     session = Session(tmp_path)
     session.add_file(1, 0, str(source))
-    raw = json.loads((tmp_path / "証拠" / "layout.json").read_text(encoding="utf-8"))
+    raw = json.loads((tmp_path / "LexCrew-PDF-Downloads" / "layout.json").read_text(encoding="utf-8"))
     assert "pages" not in raw["cards"][0]
     assert "rotation" not in raw["cards"][0]
 
@@ -216,7 +229,7 @@ def test_legacy_card_title_copies_only_onto_slots_without_a_title(tmp_path):
     added = tmp_path / "足した.pdf"
     _pdf(kept)
     _pdf(added)
-    evidence = tmp_path / "証拠"
+    evidence = tmp_path / "LexCrew-PDF-Downloads"
     evidence.mkdir()
     (evidence / "layout.json").write_text(
         json.dumps({
@@ -324,6 +337,51 @@ def test_legacy_card_rotation_copies_only_when_the_slot_has_no_key():
     assert layout.cards[0].slots[1].rotation == 0
 
 
+def test_grayscale_is_omitted_when_off_and_kept_across_series(tmp_path, monkeypatch):
+    assert default_layout().grayscale is False
+    assert "grayscale" not in layout_to_json(default_layout())
+    missing = {
+        "series": "甲",
+        "enabledSeries": ["甲", "乙", "丙"],
+        "cards": [{"number": 1, "slots": [{"files": [], "title": ""}]}],
+        "lastWritten": [],
+    }
+    assert parse_layout(missing).grayscale is False
+    saved = replace(default_layout(), grayscale=True)
+    dumped = layout_to_json(saved)
+    assert dumped["grayscale"] is True
+    assert parse_layout(dumped).grayscale is True
+    assert with_series(saved, "乙").grayscale is True
+    assert with_next_series(saved).grayscale is True
+    save_layout(tmp_path, saved)
+    assert load_layout(tmp_path).grayscale is True
+    with pytest.raises(ValueError):
+        parse_layout({**missing, "grayscale": "yes"})
+
+    source = tmp_path / "a.pdf"
+    _pdf(source)
+    session = Session(tmp_path)
+    session.add_file(1, 0, str(source))
+    assert session.set_grayscale(True)["grayscale"] is True
+    assert load_layout(tmp_path).grayscale is True
+    session.set_series("乙")
+    assert session.layout.grayscale is True
+    seen = {}
+
+    def fake_write(folder, jobs, *, last_written, preserve=(), grayscale=False):
+        seen["grayscale"] = grayscale
+        name = jobs[0].filename
+        return {"written": [{"filename": name, "stampLabel": jobs[0].stamp}], "errors": [], "keep": (name,)}
+
+    monkeypatch.setattr("lexcrew_pdf.write.write_jobs", fake_write)
+    session.generate()
+    assert seen["grayscale"] is True
+    assert session.layout.grayscale is True
+    session.set_grayscale(False)
+    raw = json.loads((tmp_path / "LexCrew-PDF-Downloads" / "layout.json").read_text(encoding="utf-8"))
+    assert "grayscale" not in raw
+
+
 def test_zero_rotation_is_omitted_after_a_full_turn(tmp_path):
     session = Session(tmp_path)
     for _ in range(4):
@@ -332,3 +390,460 @@ def test_zero_rotation_is_omitted_after_a_full_turn(tmp_path):
     assert "rotation" not in dumped["cards"][0]
     assert "rotation" not in dumped["cards"][0]["slots"][0]
     assert session.layout.cards[0].slots[0].rotation == 0
+
+
+def _card_layout(**slot):
+    return {
+        "series": "甲",
+        "enabledSeries": ["甲", "乙", "丙"],
+        "cards": [{"number": 1, "slots": [slot]}],
+        "lastWritten": [],
+    }
+
+
+def test_missing_stamp_offset_stays_at_the_origin():
+    layout = parse_layout(_card_layout(files=[], title=""))
+    assert layout.cards[0].slots[0].stamp_dx == 0
+    assert layout.cards[0].slots[0].stamp_dy == 0
+    assert "stampDx" not in layout_to_json(layout)["cards"][0]["slots"][0]
+
+
+def test_stamp_offset_in_the_layout_must_be_an_integer():
+    with pytest.raises(ValueError, match="配置ファイルを読めません"):
+        parse_layout(_card_layout(files=[], title="", stampDx=1.5, stampDy=0))
+
+
+def test_stamp_offset_stays_on_its_slot_and_on_the_first_page(tmp_path):
+    if not os.path.isfile(yu_mincho_path()):
+        pytest.skip("游明朝がありません")
+    source = tmp_path / "a.pdf"
+    other = tmp_path / "b.pdf"
+    document = fitz.open()
+    document.new_page(width=595, height=842)
+    document.new_page(width=595, height=842)
+    document.save(source)
+    document.close()
+    _pdf(other)
+    session = Session(tmp_path)
+    session.add_file(1, 0, str(source))
+    saved = session.set_stamp_offset(1, 0, -40, 55)
+    assert (saved["dx"], saved["dy"]) == (-40, 55)
+    raw = json.loads((tmp_path / "LexCrew-PDF-Downloads" / "layout.json").read_text(encoding="utf-8"))
+    assert raw["cards"][0]["slots"][0]["stampDx"] == -40
+    assert raw["cards"][0]["slots"][0]["stampDy"] == 55
+    job = jobs_from_layout(session.layout, tmp_path).jobs[0]
+    assert (job.stamp_dx, job.stamp_dy) == (-40, 55)
+    session.set_title(1, "契約")
+    session.rotate(1, 0)
+    session.add_file(1, 0, str(other))
+    session.replace_file(1, 0, 0, str(other))
+    assert (session.layout.cards[0].slots[0].stamp_dx, session.layout.cards[0].slots[0].stamp_dy) == (-40, 55)
+    session.add_branch(1)
+    assert session.layout.cards[0].slots[1].stamp_dx == 0
+    session.reset_pages(1, 0)
+    assert session.layout.cards[0].slots[0].stamp_dx == -40
+    session.begin_edit(1, 0)
+    frame = session.edit_context()["stampFrame"]
+    assert (frame["dx"], frame["dy"]) == (-40, 55)
+    moved = session.preview(1, 0, 0)
+    session.set_stamp_offset(1, 0, 0, 0)
+    parked = session.preview(1, 0, 0)
+    bare = session.preview(1, 0, 0, bare=True)
+    assert moved["image"] != parked["image"]
+    assert bare["image"] != parked["image"]
+    session.set_stamp_offset(1, 0, -40, 55)
+    written = write_jobs(tmp_path, jobs_from_layout(session.layout, tmp_path).jobs, last_written=())
+    opened = fitz.open(tmp_path / "LexCrew-PDF-Downloads" / written["written"][0]["filename"])
+    try:
+        rect = _red_rect(opened[0])
+        fresh = stamp_frame(-40, 55)
+        assert abs(rect.x0 - fresh["x"]) < 0.2
+        assert abs(rect.y0 - fresh["y"]) < 0.2
+        assert _red_rect(opened[1], missing=True) is None
+    finally:
+        opened.close()
+    shoved = session.set_stamp_offset(1, 0, 5000, -5000)
+    assert shoved["dx"] != 5000
+    assert shoved["dy"] != -5000
+    assert shoved["stampFrame"]["dx"] == shoved["dx"]
+    session.set_stamp_offset(1, 0, 0, 0)
+    cleared = json.loads((tmp_path / "LexCrew-PDF-Downloads" / "layout.json").read_text(encoding="utf-8"))
+    assert "stampDx" not in cleared["cards"][0]["slots"][0]
+    assert "stampDy" not in cleared["cards"][0]["slots"][0]
+
+
+def test_empty_cards_omit_masks_and_a_mask_round_trips(tmp_path):
+    assert "masks" not in layout_to_json(default_layout())["cards"][0]
+    source = tmp_path / "secret.pdf"
+    document = fitz.open()
+    page = document.new_page(width=595, height=842)
+    page.insert_text((72, 120), "SECRET")
+    page.insert_text((72, 240), "VISIBLE")
+    document.save(source)
+    document.close()
+    opened = fitz.open(source)
+    try:
+        word = [item for item in opened[0].get_text("words") if item[4] == "SECRET"][0]
+    finally:
+        opened.close()
+    session = Session(tmp_path)
+    session.add_file(1, 0, str(source))
+    added = session.add_mask(1, 0, 0, 0, 0, word[0], word[1], word[2] - word[0], word[3] - word[1])
+    assert added["masks"][0]["source"] == 0
+    assert added["masks"][0]["part"] == 0
+    session.set_pages(1, [{"source": 0, "page": 0, "part": 0, "group": 1}])
+    assert len(session.layout.cards[0].masks) == 1
+    raw = json.loads((tmp_path / "LexCrew-PDF-Downloads" / "layout.json").read_text(encoding="utf-8"))
+    assert raw["cards"][0]["masks"][0]["page"] == 0
+    assert load_layout(tmp_path).cards[0].masks == session.layout.cards[0].masks
+    stored = session.layout.cards[0].masks[0]
+    assert session.remove_mask(1, 0, stored.source, stored.page, stored.x, stored.y, stored.w, stored.h)["masks"] == []
+    assert session.remove_mask(1, 0, stored.source, stored.page, stored.x, stored.y, stored.w, stored.h)["masks"] == []
+    with pytest.raises(ValueError):
+        parse_layout({
+            "series": "甲",
+            "enabledSeries": ["甲"],
+            "cards": [{
+                "number": 1,
+                "slots": [{"files": [], "title": ""}],
+                "masks": [{"source": 0, "page": 0, "x": 1, "y": 1, "w": 0, "h": 4}],
+            }],
+            "lastWritten": [],
+        })
+
+
+def test_empty_cards_omit_trims_and_a_trim_round_trips(tmp_path):
+    assert "trims" not in layout_to_json(default_layout())["cards"][0]
+    source = tmp_path / "body.pdf"
+    _pdf(source, "BODY")
+    session = Session(tmp_path)
+    session.add_file(1, 0, str(source))
+    saved = session.set_trim(1, 0, 0, 0, 0, 200, 0, 0, 0)
+    assert saved["trim"] == {"top": 200, "right": 0, "bottom": 0, "left": 0}
+    raw = json.loads((tmp_path / "LexCrew-PDF-Downloads" / "layout.json").read_text(encoding="utf-8"))
+    assert raw["cards"][0]["trims"][0] == {
+        "source": 0, "page": 0, "part": 0, "top": 200, "right": 0, "bottom": 0, "left": 0,
+    }
+    assert load_layout(tmp_path).cards[0].trims == session.layout.cards[0].trims
+    cleared = session.set_trim(1, 0, 0, 0, 0, 0, 0, 0, 0)
+    assert cleared["trim"] == {"top": 0, "right": 0, "bottom": 0, "left": 0}
+    assert session.layout.cards[0].trims == ()
+    stored = json.loads((tmp_path / "LexCrew-PDF-Downloads" / "layout.json").read_text(encoding="utf-8"))
+    assert "trims" not in stored["cards"][0]
+    with pytest.raises(ValueError):
+        session.set_trim(1, 0, 0, 3, 0, 10, 0, 0, 0)
+    with pytest.raises(ValueError):
+        session.set_trim(1, 0, 0, 0, 0, 401, 0, 0, 0)
+    with pytest.raises(ValueError):
+        parse_layout({
+            "series": "甲",
+            "enabledSeries": ["甲"],
+            "cards": [{
+                "number": 1,
+                "slots": [{"files": [], "title": ""}],
+                "trims": [
+                    {"source": 0, "page": 0, "part": 0, "top": 10, "right": 0, "bottom": 0, "left": 0},
+                    {"source": 0, "page": 0, "part": 0, "top": 20, "right": 0, "bottom": 0, "left": 0},
+                ],
+            }],
+            "lastWritten": [],
+        })
+    with pytest.raises(ValueError):
+        parse_layout({
+            "series": "甲",
+            "enabledSeries": ["甲"],
+            "cards": [{
+                "number": 1,
+                "slots": [{"files": [], "title": ""}],
+                "trims": [{"source": 0, "page": 0, "part": 0, "top": 0, "right": 0, "bottom": 0, "left": 0}],
+            }],
+            "lastWritten": [],
+        })
+
+
+def test_trim_follows_a_new_file_drops_on_replace_and_survives_reorder(tmp_path):
+    first = tmp_path / "first.pdf"
+    second = tmp_path / "second.pdf"
+    _pdf(first, "FIRST")
+    document = fitz.open()
+    document.new_page(width=595, height=842).insert_text((72, 72), "A")
+    document.new_page(width=595, height=842).insert_text((72, 72), "B")
+    document.save(second)
+    document.close()
+    session = Session(tmp_path)
+    session.add_branch(1)
+    session.add_file(1, 1, str(first))
+    session.set_trim(1, 1, 0, 0, 0, 80, 0, 0, 0)
+    assert session.layout.cards[0].trims[0].source == 0
+    session.add_file(1, 0, str(second))
+    assert session.layout.cards[0].trims[0].source == 1
+    session.set_pages(1, [
+        {"source": 0, "page": 1, "part": 0, "group": 1},
+        {"source": 0, "page": 0, "part": 0, "group": 1},
+    ], 0)
+    assert session.layout.cards[0].trims[0].top == 80
+    assert session.layout.cards[0].trims[0].source == 1
+    session.rotate(1, 1)
+    assert session.layout.cards[0].trims[0].top == 80
+    session.replace_file(1, 1, 0, str(second))
+    assert session.layout.cards[0].trims == ()
+
+
+def test_pulling_a_branch_keeps_its_trim(tmp_path):
+    first = tmp_path / "first.pdf"
+    second = tmp_path / "second.pdf"
+    _pdf(first, "FIRST")
+    _pdf(second, "SECOND")
+    session = Session(tmp_path)
+    session.add_branch(1)
+    session.add_file(1, 0, str(first))
+    session.add_file(1, 1, str(second))
+    session.set_trim(1, 1, 1, 0, 0, 40, 0, 0, 0)
+    session.move_slot(1, 1, None)
+    kept = [card for card in session.layout.cards if card.trims]
+    assert session.layout.cards[0].trims == ()
+    assert len(kept) == 1
+    assert kept[0].number == 7
+    assert kept[0].trims[0].source == 0
+    assert kept[0].trims[0].top == 40
+
+
+def test_split_clears_trims_and_the_editor_reports_the_image_box(tmp_path):
+    source = tmp_path / "body.pdf"
+    _pdf(source, "BODY")
+    session = Session(tmp_path)
+    session.add_file(1, 0, str(source))
+    session.set_trim(1, 0, 0, 0, 0, 120, 0, 0, 0)
+    editor = session.editor(1, 0)
+    page = editor["columns"][0]["pages"][0]
+    assert page["trim"]["top"] == 120
+    assert page["imageBox"]["w"] > 0.9
+    assert page["imageBox"]["h"] > 0.9
+    session.set_split(1, True)
+    assert session.layout.cards[0].trims == ()
+    assert session.layout.cards[0].pages is None
+
+
+def test_generate_drops_the_trimmed_edge(tmp_path):
+    if not os.path.isfile(yu_mincho_path()):
+        pytest.skip("游明朝がありません")
+    source = tmp_path / "marked.pdf"
+    document = fitz.open()
+    page = document.new_page(width=595, height=842)
+    page.insert_text((72, 36), "EDGE")
+    page.insert_text((72, 420), "BODY")
+    document.save(source)
+    document.close()
+    session = Session(tmp_path)
+    session.add_file(1, 0, str(source))
+    session.set_trim(1, 0, 0, 0, 0, 200, 0, 0, 0)
+    result = session.generate()
+    assert result["ok"] is True
+    written = list((tmp_path / "LexCrew-PDF-Downloads").glob("*.pdf"))
+    assert len(written) == 1
+    produced = fitz.open(written[0])
+    try:
+        text = produced[0].get_text("text")
+        assert "EDGE" not in text
+        assert "BODY" in text
+        assert "甲第１号証" in text
+    finally:
+        produced.close()
+
+
+def test_empty_cards_omit_skews_and_a_skew_round_trips(tmp_path):
+    assert "skews" not in layout_to_json(default_layout())["cards"][0]
+    source = tmp_path / "body.pdf"
+    _pdf(source, "BODY")
+    session = Session(tmp_path)
+    session.add_file(1, 0, str(source))
+    saved = session.set_skew(1, 0, 0, 0, 40)
+    assert saved["skewTenths"] == 40
+    raw = json.loads((tmp_path / "LexCrew-PDF-Downloads" / "layout.json").read_text(encoding="utf-8"))
+    assert raw["cards"][0]["skews"] == [{"source": 0, "page": 0, "tenths": 40}]
+    assert load_layout(tmp_path).cards[0].skews == session.layout.cards[0].skews
+    cleared = session.set_skew(1, 0, 0, 0, 0)
+    assert cleared["skewTenths"] == 0
+    assert session.layout.cards[0].skews == ()
+    stored = json.loads((tmp_path / "LexCrew-PDF-Downloads" / "layout.json").read_text(encoding="utf-8"))
+    assert "skews" not in stored["cards"][0]
+    with pytest.raises(ValueError):
+        session.set_skew(1, 0, 0, 0, 101)
+    with pytest.raises(ValueError):
+        parse_layout({
+            "series": "甲",
+            "enabledSeries": ["甲"],
+            "cards": [{
+                "number": 1,
+                "slots": [{"files": [], "title": ""}],
+                "skews": [
+                    {"source": 0, "page": 0, "tenths": 10},
+                    {"source": 0, "page": 0, "tenths": 20},
+                ],
+            }],
+            "lastWritten": [],
+        })
+    with pytest.raises(ValueError):
+        parse_layout({
+            "series": "甲",
+            "enabledSeries": ["甲"],
+            "cards": [{
+                "number": 1,
+                "slots": [{"files": [], "title": ""}],
+                "skews": [{"source": 0, "page": 0, "tenths": 0}],
+            }],
+            "lastWritten": [],
+        })
+
+
+def test_split_halves_report_the_same_skew(tmp_path):
+    source = tmp_path / "spread.pdf"
+    document = fitz.open()
+    page = document.new_page(width=1191, height=842)
+    page.insert_text((40, 80), "LEFTSIDE")
+    page.insert_text((1191 - 160, 80), "RIGHTSIDE")
+    document.save(source)
+    document.close()
+    session = Session(tmp_path)
+    session.add_file(1, 0, str(source))
+    session.set_split(1, True)
+    session.set_skew(1, 0, 0, 0, 25)
+    pages = session.editor(1, 0)["columns"][0]["pages"]
+    assert [row["part"] for row in pages] == [1, 2]
+    assert [row["skewTenths"] for row in pages] == [25, 25]
+    assert len(session.layout.cards[0].skews) == 1
+
+
+def test_saved_skew_stays_on_reset_and_clears_when_split(tmp_path):
+    source = tmp_path / "two.pdf"
+    document = fitz.open()
+    document.new_page(width=595, height=842).insert_text((72, 72), "A")
+    document.new_page(width=595, height=842).insert_text((72, 72), "B")
+    document.save(source)
+    document.close()
+    session = Session(tmp_path)
+    session.add_file(1, 0, str(source))
+    session.set_skew(1, 0, 0, 0, 40)
+    session.set_pages(1, [
+        {"source": 0, "page": 1, "part": 0, "group": 1},
+        {"source": 0, "page": 0, "part": 0, "group": 1},
+    ])
+    session.reset_pages(1, 0)
+    assert session.layout.cards[0].skews[0].tenths == 40
+    session.set_split(1, True)
+    assert session.layout.cards[0].skews == ()
+
+
+def test_skew_follows_a_new_file_and_drops_on_replace(tmp_path):
+    first = tmp_path / "first.pdf"
+    second = tmp_path / "second.pdf"
+    _pdf(first, "FIRST")
+    _pdf(second, "SECOND")
+    session = Session(tmp_path)
+    session.add_branch(1)
+    session.add_file(1, 1, str(first))
+    session.set_skew(1, 1, 0, 0, 30)
+    assert session.layout.cards[0].skews[0].source == 0
+    session.add_file(1, 0, str(second))
+    assert session.layout.cards[0].skews[0].source == 1
+    assert session.layout.cards[0].skews[0].tenths == 30
+    session.replace_file(1, 1, 0, str(first))
+    assert session.layout.cards[0].skews == ()
+
+
+def test_generate_skews_the_page_and_leaves_the_stamp(tmp_path):
+    if not os.path.isfile(yu_mincho_path()):
+        pytest.skip("游明朝がありません")
+    source = tmp_path / "marked.pdf"
+    document = fitz.open()
+    page = document.new_page(width=595, height=842)
+    page.insert_text((260, 48), "TOPMARK")
+    page.insert_text((260, 420), "BODY")
+    document.save(source)
+    document.close()
+    session = Session(tmp_path)
+    session.add_file(1, 0, str(source))
+    session.set_skew(1, 0, 0, 0, 50)
+    result = session.generate()
+    assert result["ok"] is True
+    written = list((tmp_path / "LexCrew-PDF-Downloads").glob("*.pdf"))
+    assert len(written) == 1
+    straight = fitz.open(stream=stamp_sources_to_pdf([str(source)], "甲第１号証"), filetype="pdf")
+    produced = fitz.open(written[0])
+    try:
+        assert "TOPMARK" in produced[0].get_text("text")
+        assert "甲第１号証" in produced[0].get_text("text")
+        before = [item for item in straight[0].get_text("words") if item[4] == "TOPMARK"][0]
+        after = [item for item in produced[0].get_text("words") if item[4] == "TOPMARK"][0]
+        assert after[0] > before[0] + 2
+    finally:
+        straight.close()
+        produced.close()
+
+
+def test_mask_follows_a_new_file_and_drops_when_that_file_is_replaced(tmp_path):
+    first = tmp_path / "first.pdf"
+    second = tmp_path / "second.pdf"
+    _pdf(first, "FIRST")
+    _pdf(second, "SECOND")
+    session = Session(tmp_path)
+    session.add_branch(1)
+    session.add_file(1, 1, str(first))
+    session.add_mask(1, 1, 0, 0, 0, 60, 40, 120, 40)
+    assert session.layout.cards[0].masks[0].source == 0
+    session.add_file(1, 0, str(second))
+    assert session.layout.cards[0].masks[0].source == 1
+    session.replace_file(1, 1, 0, str(second))
+    assert session.layout.cards[0].masks == ()
+
+
+def test_generate_burns_a_mask_and_skips_a_missing_page(tmp_path):
+    if not os.path.isfile(yu_mincho_path()):
+        pytest.skip("游明朝がありません")
+    source = tmp_path / "secret.pdf"
+    document = fitz.open()
+    page = document.new_page(width=595, height=842)
+    page.insert_text((72, 120), "SECRET")
+    page.insert_text((72, 240), "VISIBLE")
+    document.save(source)
+    document.close()
+    opened = fitz.open(source)
+    try:
+        word = [item for item in opened[0].get_text("words") if item[4] == "SECRET"][0]
+    finally:
+        opened.close()
+    session = Session(tmp_path)
+    session.add_file(1, 0, str(source))
+    session.add_mask(1, 0, 0, 0, 0, word[0], word[1], word[2] - word[0], word[3] - word[1])
+    from lexcrew_pdf.layout import Mask
+    from dataclasses import replace as replace_card
+
+    card = session.layout.cards[0]
+    session._put(replace_card(card, masks=card.masks + (Mask(0, 99, 0, 0, 10, 10),)))
+    before = source.read_bytes()
+    result = session.generate()
+    assert result["ok"] is True
+    assert source.read_bytes() == before
+    written = list((tmp_path / "LexCrew-PDF-Downloads").glob("*.pdf"))
+    assert len(written) == 1
+    produced = fitz.open(written[0])
+    try:
+        text = produced[0].get_text("text")
+        assert "SECRET" not in text
+        assert "VISIBLE" in text
+        assert "甲第１号証" in text
+    finally:
+        produced.close()
+
+
+def _red_rect(page, missing=False):
+    found = []
+    for drawing in page.get_drawings():
+        color = drawing.get("color")
+        if color and len(color) >= 3 and color[0] > 0.8 and color[1] < 0.2 and color[2] < 0.2:
+            found.append(drawing["rect"])
+    if missing:
+        assert found == []
+        return None
+    assert len(found) == 1
+    return found[0]

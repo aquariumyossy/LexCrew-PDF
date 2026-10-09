@@ -1,30 +1,131 @@
 """LexCrew-PDFの窓。"""
 from __future__ import annotations
 
+import ctypes
 import os
+import sys
 import threading
 import time
 import unicodedata
+from ctypes import wintypes
 from pathlib import Path
 
 from .session import Session, downloads_dir
 
+# ハンドルを関数の中だけに置くと、ガベージコレクションでミューテックスが外れる。
+_instance_handle = None
+_APP_USER_MODEL_ID = "LexCrew.PDF"
+_WEBVIEW2_URL = "https://developer.microsoft.com/microsoft-edge/webview2/"
+
+
+def package_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def output_root() -> Path:
+    override = os.environ.get("LEXCREW_FOLDER", "").strip()
+    if override:
+        return Path(override)
+    return downloads_dir()
+
 
 def boot() -> Session:
-    session = Session(downloads_dir())
+    session = Session(output_root())
     session.view()
     print("cards-ready", flush=True)
     return session
 
 
-def main() -> None:
-    session = boot()
+def tell(message: str) -> None:
+    if sys.stdout is None or sys.stderr is None:
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        user32.MessageBoxW.argtypes = [wintypes.HWND, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.UINT]
+        user32.MessageBoxW.restype = ctypes.c_int
+        user32.MessageBoxW(None, message, "LexCrew-PDF", 0x40)
+        return
+    print(message, file=sys.stderr)
+
+
+def acquire_single_instance() -> bool:
+    global _instance_handle
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
+    kernel32.CreateMutexW.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    ctypes.set_last_error(0)
+    handle = kernel32.CreateMutexW(None, False, "Local\\LexCrew-PDF")
+    error = ctypes.get_last_error()
+    if not handle:
+        raise SystemExit("起動を確認できません。")
+    if error == 183:
+        kernel32.CloseHandle(handle)
+        return False
+    _instance_handle = handle
+    return True
+
+
+def focus_existing() -> bool:
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
+    user32.FindWindowW.restype = wintypes.HWND
+    user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+    user32.ShowWindow.restype = wintypes.BOOL
+    user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+    user32.SetForegroundWindow.restype = wintypes.BOOL
+    hwnd = user32.FindWindowW(None, "LexCrew-PDF")
+    if not hwnd:
+        return False
+    user32.ShowWindow(hwnd, 9)
+    return bool(user32.SetForegroundWindow(hwnd))
+
+
+def set_app_user_model_id() -> None:
+    shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+    shell32.SetCurrentProcessExplicitAppUserModelID.argtypes = [wintypes.LPCWSTR]
+    shell32.SetCurrentProcessExplicitAppUserModelID.restype = ctypes.HRESULT
+    shell32.SetCurrentProcessExplicitAppUserModelID(_APP_USER_MODEL_ID)
+
+
+def load_webview():
     try:
         import webview
+        from webview.platforms import winforms
     except ImportError as exc:
         raise SystemExit("画面を開く部品がありません。") from exc
+    if getattr(winforms, "renderer", None) != "edgechromium":
+        raise SystemExit(
+            "Microsoft Edge WebView2 ランタイムが必要です。\n" + _WEBVIEW2_URL
+        )
+    return webview
+
+
+def main() -> None:
+    try:
+        _run()
+    except SystemExit as exc:
+        if isinstance(exc.code, str) and exc.code:
+            tell(exc.code)
+            raise SystemExit(1) from None
+        raise
+    except Exception:
+        tell("起動できません。")
+        raise SystemExit(1) from None
+
+
+def _run() -> None:
+    if not acquire_single_instance():
+        if not focus_existing():
+            tell("すでに起動しています。")
+        return
+    icon = package_root() / "LexCrew-PDF.ico"
+    # pythonw のまま ID だけ付けると、対応するショートカットが無い開発起動でタスクバーの絵が崩れる。
+    if icon.is_file():
+        set_app_user_model_id()
+    session = boot()
+    webview = load_webview()
     api = Api(session)
-    page = Path(__file__).resolve().parents[2] / "ui" / "index.html"
+    page = package_root() / "ui" / "index.html"
     window = webview.create_window(
         "LexCrew-PDF",
         url=page.as_uri(),
@@ -34,7 +135,17 @@ def main() -> None:
         min_size=(760, 520),
     )
     api.attach(window)
-    webview.start()
+    if icon.is_file():
+        webview.start(icon=str(icon))
+    else:
+        webview.start()
+
+
+def reveal_folder(folder: Path) -> None:
+    try:
+        os.startfile(os.fspath(folder))
+    except OSError:
+        return
 
 
 class Api:
@@ -92,6 +203,11 @@ class Api:
     def set_series(self, series: str) -> dict:
         view = self._run(lambda: self.session.set_series(series))
         self._notify_editor("window.invalidatePreview()")
+        return view
+
+    def set_grayscale(self, enabled: bool) -> dict:
+        view = self._run(lambda: self.session.set_grayscale(bool(enabled)))
+        self._notify_editor("window.reloadAppearance()")
         return view
 
     def add_series_choice(self) -> dict:
@@ -191,7 +307,25 @@ class Api:
         return self._run(lambda: self.session.piece(int(number), int(source), int(page), int(part), float(zoom), slot))
 
     def generate(self) -> dict:
-        return self._run(self.session.generate)
+        result = self._run(self.session.generate)
+        written = result.get("written") or ()
+        output = result.get("outputDir") or ""
+        if written and output:
+            reveal_folder(Path(output))
+        return result
+
+    def clear(self) -> dict:
+        editor = None
+        with self.session._lock:
+            editor = self._editor_window
+            self._editor_window = None
+            view = self.session.clear()
+        if editor is not None:
+            try:
+                editor.destroy()
+            except Exception:
+                pass
+        return view
 
     def _run(self, fn):
         try:
@@ -239,7 +373,7 @@ class Api:
         import webview
 
         context = self.session.edit_context()
-        page = Path(__file__).resolve().parents[2] / "ui" / "edit.html"
+        page = package_root() / "ui" / "edit.html"
         editor_api = EditorApi(self.session, self)
         window = webview.create_window(
             context.get("label") or "ページ編集",
@@ -324,17 +458,81 @@ class EditorApi:
         return self._run(lambda: self.session.editor(int(number), int(slot_index)))
 
     def set_pages(self, number: int, slot_index: int, pages: list) -> dict:
-        result = self._run(lambda: self.session.set_pages(int(number), pages, int(slot_index)))
-        self.main._refresh_main()
-        return result
+        return self._commit(lambda: self.session.set_pages(int(number), pages, int(slot_index)))
 
     def reset_pages(self, number: int, slot_index: int = 0) -> dict:
-        result = self._run(lambda: self.session.reset_pages(int(number), int(slot_index)))
-        self.main._refresh_main()
+        return self._commit(lambda: self.session.reset_pages(int(number), int(slot_index)))
+
+    def add_mask(self, number: int, slot_index: int, source: int, page: int, part: int, x: float, y: float, w: float, h: float) -> dict:
+        return self._commit(lambda: self.session.add_mask(
+            int(number), int(slot_index), int(source), int(page), int(part), x, y, w, h,
+        ))
+
+    def remove_mask(self, number: int, slot_index: int, source: int, page: int, x: float, y: float, w: float, h: float) -> dict:
+        return self._commit(lambda: self.session.remove_mask(
+            int(number), int(slot_index), int(source), int(page), x, y, w, h,
+        ))
+
+    def set_trim(
+        self,
+        number: int,
+        slot_index: int,
+        source: int,
+        page: int,
+        part: int,
+        top: int,
+        right: int,
+        bottom: int,
+        left: int,
+    ) -> dict:
+        return self._commit(lambda: self.session.set_trim(
+            int(number),
+            int(slot_index),
+            int(source),
+            int(page),
+            int(part),
+            top,
+            right,
+            bottom,
+            left,
+        ))
+
+    def set_skew(self, number: int, slot_index: int, source: int, page: int, tenths: int) -> dict:
+        return self._commit(lambda: self.session.set_skew(
+            int(number),
+            int(slot_index),
+            int(source),
+            int(page),
+            tenths,
+        ))
+
+    def set_stamp_offset(self, number: int, slot_index: int, dx: int, dy: int) -> dict:
+        from .stamp import StampFontMissing
+
+        def save():
+            try:
+                return self.session.set_stamp_offset(int(number), int(slot_index), dx, dy)
+            except StampFontMissing as exc:
+                return {"ok": False, "message": str(exc)}
+
+        return self._commit(save)
+
+    def _commit(self, fn):
+        try:
+            with self.session._lock:
+                if self.main._living_editor() is None:
+                    return self.session.view()
+                result = fn()
+        except ValueError as exc:
+            result = {"ok": False, "message": str(exc)}
+        if self.main._living_editor() is not None:
+            self.main._refresh_main()
         return result
 
-    def preview(self, number: int, slot_index: int, page_index: int, zoom: float = 1.15) -> dict:
-        return self._run(lambda: self.session.preview(int(number), int(slot_index), int(page_index), float(zoom)))
+    def preview(self, number: int, slot_index: int, page_index: int, zoom: float = 1.15, bare: bool = False) -> dict:
+        return self._run(lambda: self.session.preview(
+            int(number), int(slot_index), int(page_index), float(zoom), bool(bare),
+        ))
 
     def piece(self, number: int, source: int, page: int, part: int, zoom: float = 0.45, slot_index: int | None = None) -> dict:
         slot = None if slot_index is None else int(slot_index)

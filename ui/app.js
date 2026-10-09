@@ -51,7 +51,12 @@ function render() {
   const series = document.getElementById("series");
   if (document.activeElement !== series) series.value = view.labelTemplate || "";
   document.getElementById("output").textContent = view.outputDir ? `保存先 ${view.outputDir}` : "";
+  const grayscale = document.getElementById("grayscale");
+  const gray = Boolean(view.grayscale);
+  grayscale.classList.toggle("is-on", gray);
+  grayscale.setAttribute("aria-pressed", gray ? "true" : "false");
   document.getElementById("generate").disabled = generating;
+  document.getElementById("clear").disabled = generating;
   const root = document.getElementById("cards");
   root.innerHTML = "";
   for (const card of view.cards) {
@@ -158,6 +163,7 @@ function slotCard(card, slot, isLast) {
     );
     const split = miniButton("A4分割", () => api.set_split(card.number, !card.splitA4).then(applyView));
     split.className = card.splitA4 ? "btn mini evidence-split is-on" : "btn mini evidence-split";
+    split.title = "見開きを、左から右へA4にする";
     split.dataset.split = String(card.number);
     split.hidden = !card.splitA4;
     actions.appendChild(split);
@@ -456,6 +462,30 @@ cardList.addEventListener("drop", (event) => {
   });
 });
 
+document.getElementById("grayscale").addEventListener("click", async () => {
+  if (!api || !view) return;
+  const result = await api.set_grayscale(!view.grayscale);
+  if (result && result.ok === false && result.message) showBanner(result.message);
+  applyView(result);
+});
+
+document.getElementById("clear").addEventListener("click", async () => {
+  if (!api || generating) return;
+  const editing = Boolean(view && view.editor);
+  let message = "カードを初期状態に戻します。原本、書名、枝番、追加したカード、ページ順、番号の種類、白黒は消え、甲第１号証から甲第６号証の空のカードになります。生成済みの証拠PDFは残ります。";
+  if (editing) message += "開いている編集ウィンドウも閉じます。";
+  if (!window.confirm(message)) return;
+  const button = document.getElementById("clear");
+  button.disabled = true;
+  try {
+    const result = await api.clear();
+    if (!(result && result.message)) showBanner("");
+    await applyView(result);
+  } finally {
+    if (!generating) button.disabled = false;
+  }
+});
+
 document.getElementById("generate").addEventListener("click", async () => {
   generating = true;
   document.getElementById("generate").disabled = true;
@@ -463,4 +493,18 @@ document.getElementById("generate").addEventListener("click", async () => {
   generating = false;
   if (result && result.message) showBanner(result.message);
   applyView(result);
+});
+
+const help = document.getElementById("help");
+document.getElementById("help-open").addEventListener("click", () => {
+  help.showModal();
+});
+document.getElementById("help-close").addEventListener("click", () => {
+  help.close();
+});
+help.addEventListener("click", (event) => {
+  const box = help.getBoundingClientRect();
+  const inside = event.clientX >= box.left && event.clientX <= box.right
+    && event.clientY >= box.top && event.clientY <= box.bottom;
+  if (!inside) help.close();
 });

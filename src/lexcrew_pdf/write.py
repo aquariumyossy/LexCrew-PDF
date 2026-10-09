@@ -1,13 +1,12 @@
-"""証拠フォルダへの書き出し。前回このアプリが書いた PDF だけを消す。"""
+"""出力フォルダへの書き出し。前回このアプリが書いた PDF だけを消す。"""
 from __future__ import annotations
 
 import os
 from pathlib import Path
 
+from .layout import OUTPUT_DIR_NAME
 from .plan import OutputJob
-from .stamp import StampFontMissing, require_yu_mincho, stamp_sources_to_pdf
-
-OUTPUT_DIR_NAME = "証拠"
+from .stamp import StampFontMissing, require_yu_mincho, skew_lookup, stamp_sources_to_pdf, trim_lookup
 
 
 def write_jobs(
@@ -16,6 +15,7 @@ def write_jobs(
     *,
     last_written: tuple[str, ...] | list[str],
     preserve: tuple[str, ...] | list[str] = (),
+    grayscale: bool = False,
 ) -> dict:
     """ジョブを書き、last_written から外れた前回分だけを消す。
 
@@ -36,6 +36,12 @@ def write_jobs(
                 tilt=job.rotation,
                 split=job.split_a4,
                 pages=job.pages,
+                grayscale=grayscale,
+                stamp_dx=job.stamp_dx,
+                stamp_dy=job.stamp_dy,
+                masks=job.masks,
+                trims=trim_lookup(job.trims),
+                skews=skew_lookup(job.skews),
             )
             dest.mkdir(parents=True, exist_ok=True)
             target = _checked_output_path(dest, job.filename)

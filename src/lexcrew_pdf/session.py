@@ -7,15 +7,20 @@ import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from ctypes import wintypes
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .names import branch_number, display_label, document_title, output_filename
 from .layout import (
+    OUTPUT_DIR_NAME,
     Card,
     Layout,
+    Mask,
     PageRow,
+    Skew,
     Slot,
+    Trim,
+    adopt_output_directory,
     default_layout,
     layout_path,
     load_layout,
@@ -118,13 +123,14 @@ class Session:
 
     @_locked
     def view(self) -> dict:
-        output = self.folder / "証拠" if self.folder else None
+        output = self.folder / OUTPUT_DIR_NAME if self.folder else None
         editing = self.open_editor
         return {
             "folder": str(self.folder) if self.folder else "",
             "outputDir": str(output) if output else "",
             "series": self.layout.series,
             "labelTemplate": self.layout.label_template,
+            "grayscale": self.layout.grayscale,
             "enabledSeries": list(self.layout.enabled_series),
             "canAddSeries": len(self.layout.enabled_series) < 5,
             "message": self.notice,
@@ -161,12 +167,19 @@ class Session:
         if editing is None:
             raise ValueError("編集は開いていません。")
         card = self._card(editing.number)
+        slot = card.slots[editing.slot_index]
+        from .stamp import a4_points, stamp_frame
+
+        width, height = a4_points()
         return {
             "number": editing.number,
             "slot": editing.slot_index,
             "label": display_label(self.layout.label_template, card.number, editing.slot_index, len(card.slots)),
-            "rotation": card.slots[editing.slot_index].rotation,
+            "rotation": slot.rotation,
             "split": card.split_a4,
+            "pageWidth": width,
+            "pageHeight": height,
+            "stampFrame": stamp_frame(slot.stamp_dx, slot.stamp_dy),
         }
 
     @_locked
@@ -183,6 +196,11 @@ class Session:
             self.notice = directory_message()
             return
         self.folder = folder
+        try:
+            adopt_output_directory(folder)
+        except OSError:
+            self.notice = f"保存先を {OUTPUT_DIR_NAME} に移せません。"
+            return
         if not layout_path(folder).is_file():
             return
         try:
@@ -272,6 +290,28 @@ class Session:
         return self.view()
 
     @_locked
+    def set_grayscale(self, enabled: bool) -> dict:
+        self.layout = Layout(
+            series=self.layout.series,
+            enabled_series=self.layout.enabled_series,
+            cards=self.layout.cards,
+            last_written=self.layout.last_written,
+            label_template=self.layout.label_template,
+            grayscale=enabled is True,
+        )
+        self._persist()
+        return self.view()
+
+    @_locked
+    def clear(self) -> dict:
+        """作業中の配置を起動直後に戻す。生成済みPDFと出力フォルダは残す。"""
+        self.open_editor = None
+        self.card_errors = {}
+        self.layout = default_layout()
+        self._persist()
+        return self.view()
+
+    @_locked
     def add_series_choice(self) -> dict:
         self.layout = with_next_series(self.layout)
         self._persist()
@@ -291,7 +331,7 @@ class Session:
         slot_index = int(slot_index)
         _check_slot(card, slot_index)
         slots = list(card.slots)
-        slots[slot_index] = Slot(slots[slot_index].files, str(title or ""), slots[slot_index].rotation)
+        slots[slot_index] = replace(slots[slot_index], title=str(title or ""))
         self._put(_replace(card, slots=tuple(slots)))
         return self.view()
 
@@ -303,7 +343,7 @@ class Session:
         _check_slot(card, slot_index)
         slots = list(card.slots)
         slot = slots[slot_index]
-        slots[slot_index] = Slot(slot.files, slot.title, (slot.rotation + 90) % 360)
+        slots[slot_index] = replace(slot, rotation=(slot.rotation + 90) % 360)
         self._put(_replace(card, slots=tuple(slots)))
         return self.view()
 
@@ -313,8 +353,25 @@ class Session:
         card = self._card(number)
         if bool(split) == card.split_a4:
             return self.view()
-        self._put(_replace(card, split_a4=bool(split), pages=None))
+        self._put(_replace(card, split_a4=bool(split), pages=None, trims=(), skews=()))
         return self.view()
+
+    @_locked
+    def set_stamp_offset(self, number: int, slot_index: int, dx: int, dy: int) -> dict:
+        from .stamp import StampFontMissing, stamp_frame
+
+        card = self._card(int(number))
+        slot_index = int(slot_index)
+        _check_slot(card, slot_index)
+        frame = stamp_frame(_point(dx), _point(dy))
+        if frame is None:
+            raise StampFontMissing(
+                "游明朝（yumin.ttf）が見つからないため、証拠番号の位置を決められません。"
+            )
+        slots = list(card.slots)
+        slots[slot_index] = replace(slots[slot_index], stamp_dx=frame["dx"], stamp_dy=frame["dy"])
+        self._put(_replace(card, slots=tuple(slots)))
+        return {"dx": frame["dx"], "dy": frame["dy"], "stampFrame": frame}
 
     @_locked
     def add_file(self, number: int, slot_index: int, file_path: str) -> dict:
@@ -324,9 +381,12 @@ class Session:
         slots = list(card.slots)
         slot = slots[slot_index]
         insert_at = sum(len(item.files) for item in slots[:slot_index]) + len(slot.files)
-        slots[slot_index] = Slot(slot.files + (stored,), slot.title, slot.rotation)
+        slots[slot_index] = replace(slot, files=slot.files + (stored,))
         pages = _shift(card.pages, insert_at)
-        self._put(_replace(card, slots=tuple(slots), pages=pages))
+        masks = _shift_sources(card.masks, insert_at)
+        trims = _shift_sources(card.trims, insert_at)
+        skews = _shift_sources(card.skews, insert_at)
+        self._put(_replace(card, slots=tuple(slots), pages=pages, masks=masks, trims=trims, skews=skews))
         return self.view()
 
     @_locked
@@ -337,8 +397,12 @@ class Session:
         slots = list(card.slots)
         files = list(slots[slot_index].files)
         files[file_index] = stored
-        slots[slot_index] = Slot(tuple(files), slots[slot_index].title, slots[slot_index].rotation)
-        self._put(_replace(card, slots=tuple(slots), pages=None))
+        flat = sum(len(item.files) for item in slots[:slot_index]) + file_index
+        slots[slot_index] = replace(slots[slot_index], files=tuple(files))
+        masks = _drop_sources(card.masks, flat, 1, 1)
+        trims = _drop_sources(card.trims, flat, 1, 1)
+        skews = _drop_sources(card.skews, flat, 1, 1)
+        self._put(_replace(card, slots=tuple(slots), pages=None, masks=masks, trims=trims, skews=skews))
         return self.view()
 
     @_locked
@@ -349,8 +413,13 @@ class Session:
         card = self._card(number)
         stored = tuple(self._store(path) for path in paths)
         slots = list(card.slots)
-        slots[slot_index] = Slot(stored, slots[slot_index].title, slots[slot_index].rotation)
-        self._put(_replace(card, slots=tuple(slots), pages=None))
+        start = sum(len(item.files) for item in slots[:slot_index])
+        old_count = len(slots[slot_index].files)
+        slots[slot_index] = replace(slots[slot_index], files=stored)
+        masks = _drop_sources(card.masks, start, old_count, len(stored))
+        trims = _drop_sources(card.trims, start, old_count, len(stored))
+        skews = _drop_sources(card.skews, start, old_count, len(stored))
+        self._put(_replace(card, slots=tuple(slots), pages=None, masks=masks, trims=trims, skews=skews))
         return self.view()
 
     @_locked
@@ -378,23 +447,30 @@ class Session:
         buckets = _resolved(card, natural, files_per_slot)
         group = slot_index + 1
         start, end = _slot_source_span(files_per_slot, slot_index)
+        shown = list(buckets.get(group) or [])
+        hidden = [ref for ref in buckets.get(0) or [] if start <= ref[0] < end]
+        tilt = card.slots[slot_index].rotation
+        boxes = _image_boxes(self._paths(card), shown + hidden, tilt)
         return {
             "number": number,
             "slot": slot_index,
+            "masks": _project_masks(
+                self._paths(card),
+                card.masks,
+                shown,
+                tilt,
+                card.skews,
+            ),
             "columns": [
                 {
                     "group": group,
                     "title": "出すページ",
-                    "pages": [_piece(ref, group) for ref in buckets.get(group) or []],
+                    "pages": [_piece(ref, group, card.trims, boxes, card.skews) for ref in shown],
                 },
                 {
                     "group": 0,
                     "title": "除くページ",
-                    "pages": [
-                        _piece(ref, 0)
-                        for ref in buckets.get(0) or []
-                        if start <= ref[0] < end
-                    ],
+                    "pages": [_piece(ref, 0, card.trims, boxes, card.skews) for ref in hidden],
                 },
             ],
         }
@@ -412,6 +488,172 @@ class Session:
         merged = [item for item in current if item[0] not in editable] + parsed
         self._store_assignment(card, natural, files_per_slot, merged)
         return self.view()
+
+    @_locked
+    def add_mask(
+        self,
+        number: int,
+        slot_index: int,
+        source: int,
+        page: int,
+        part: int,
+        x: float,
+        y: float,
+        w: float,
+        h: float,
+    ) -> dict:
+        from .stamp import open_source, source_mask_from_output
+
+        card = self._card(int(number))
+        slot_index = int(slot_index)
+        _check_slot(card, slot_index)
+        source = int(source)
+        page = int(page)
+        part = int(part)
+        if part not in (0, 1, 2):
+            raise ValueError("マスキングの範囲が不正です。")
+        paths = self._paths(card)
+        if source < 0 or source >= len(paths):
+            raise ValueError("原本のページが見つかりません。")
+        left, top, width, height = _output_span(x, y, w, h)
+        document = open_source(paths[source])
+        try:
+            if page < 0 or page >= document.page_count:
+                raise ValueError("原本のページが見つかりません。")
+            stored = source_mask_from_output(
+                document[page],
+                part,
+                card.slots[slot_index].rotation,
+                (left, top, left + width, top + height),
+                _skew_tenths(card, source, page),
+            )
+        finally:
+            document.close()
+        if stored is None:
+            raise ValueError("マスキングできる範囲がありません。")
+        mask = Mask(source=source, page=page, x=stored[0], y=stored[1], w=stored[2], h=stored[3])
+        card = _replace(card, masks=card.masks + (mask,))
+        self._put(card)
+        return {"masks": self._mask_views(card, slot_index)}
+
+    @_locked
+    def remove_mask(
+        self,
+        number: int,
+        slot_index: int,
+        source: int,
+        page: int,
+        x: float,
+        y: float,
+        w: float,
+        h: float,
+    ) -> dict:
+        card = self._card(int(number))
+        slot_index = int(slot_index)
+        _check_slot(card, slot_index)
+        key = _mask_identity(int(source), int(page), x, y, w, h)
+        kept = []
+        removed = False
+        for mask in card.masks:
+            if not removed and _mask_identity(mask.source, mask.page, mask.x, mask.y, mask.w, mask.h) == key:
+                removed = True
+                continue
+            kept.append(mask)
+        card = _replace(card, masks=tuple(kept))
+        self._put(card)
+        return {"masks": self._mask_views(card, slot_index)}
+
+    @_locked
+    def set_trim(
+        self,
+        number: int,
+        slot_index: int,
+        source: int,
+        page: int,
+        part: int,
+        top: int,
+        right: int,
+        bottom: int,
+        left: int,
+    ) -> dict:
+        from .stamp import page_trim
+
+        card = self._card(int(number))
+        slot_index = int(slot_index)
+        _check_slot(card, slot_index)
+        key = (_whole(source), _whole(page), _whole(part))
+        if key[2] not in (0, 1, 2):
+            raise ValueError("原本のページが見つかりません。")
+        natural, files_per_slot = self._natural(card)
+        buckets = _resolved(card, natural, files_per_slot)
+        if key not in _editable_keys(buckets, files_per_slot, slot_index):
+            raise ValueError("原本のページが見つかりません。")
+        parsed = page_trim(top, right, bottom, left)
+        kept = [row for row in card.trims if (row.source, row.page, row.part) != key]
+        if parsed is not None:
+            kept.append(Trim(
+                source=key[0],
+                page=key[1],
+                part=key[2],
+                top=parsed.top,
+                right=parsed.right,
+                bottom=parsed.bottom,
+                left=parsed.left,
+            ))
+        card = _replace(card, trims=tuple(kept))
+        self._put(card)
+        edges = parsed
+        return {
+            "trim": {
+                "top": 0 if edges is None else edges.top,
+                "right": 0 if edges is None else edges.right,
+                "bottom": 0 if edges is None else edges.bottom,
+                "left": 0 if edges is None else edges.left,
+            },
+        }
+
+    @_locked
+    def set_skew(
+        self,
+        number: int,
+        slot_index: int,
+        source: int,
+        page: int,
+        tenths: int,
+    ) -> dict:
+        from .stamp import page_skew
+
+        card = self._card(int(number))
+        slot_index = int(slot_index)
+        _check_slot(card, slot_index)
+        source = _whole(source)
+        page = _whole(page)
+        natural, files_per_slot = self._natural(card)
+        buckets = _resolved(card, natural, files_per_slot)
+        editable = _editable_keys(buckets, files_per_slot, slot_index)
+        if not any(ref[0] == source and ref[1] == page for ref in editable):
+            raise ValueError("原本のページが見つかりません。")
+        parsed = page_skew(tenths)
+        kept = [row for row in card.skews if (row.source, row.page) != (source, page)]
+        if parsed is not None:
+            kept.append(Skew(source=source, page=page, tenths=parsed))
+        card = _replace(card, skews=tuple(kept))
+        self._put(card)
+        return {
+            "skewTenths": 0 if parsed is None else parsed,
+            "masks": self._mask_views(card, slot_index),
+        }
+
+    def _mask_views(self, card: Card, slot_index: int) -> list[dict]:
+        natural, files_per_slot = self._natural(card)
+        buckets = _resolved(card, natural, files_per_slot)
+        return _project_masks(
+            self._paths(card),
+            card.masks,
+            list(buckets.get(slot_index + 1) or []),
+            card.slots[slot_index].rotation,
+            card.skews,
+        )
 
     @_locked
     def reset_pages(self, number: int, slot_index: int = 0) -> dict:
@@ -472,7 +714,7 @@ class Session:
         """ファイルがあるカードだけ、表示のあとでページ数とサムネイルを数える。"""
         from .names import stamp_label
         from .pages import resolve_buckets
-        from .stamp import inspect_source_pages, render_piece_jpeg, render_stamped_page_jpeg
+        from .stamp import inspect_source_pages, render_piece_jpeg, render_stamped_page_jpeg, skew_lookup, trim_lookup
 
         with self._lock:
             card = self._card(int(number))
@@ -481,8 +723,15 @@ class Session:
             evidence_number = card.number
             split = card.split_a4
             rotations = [slot.rotation for slot in card.slots]
+            offsets = [(slot.stamp_dx, slot.stamp_dy) for slot in card.slots]
             page_rows = _rows(card.pages)
             template = self.layout.label_template
+            grayscale = self.layout.grayscale
+            masks = card.masks
+            trims = card.trims
+            skews = card.skews
+        trim_map = trim_lookup(trims)
+        skew_map = skew_lookup(skews)
         empty_slots = [{"index": index, "pageCount": 0, "thumb": ""} for index in range(len(counts))]
         if not paths:
             return {"number": evidence_number, "pageCount": 0, "splittable": False, "thumb": "", "slots": empty_slots}
@@ -497,6 +746,7 @@ class Session:
             output_refs = list(buckets.get(index + 1) or [])
             thumb = ""
             if output_refs:
+                stamp_dx, stamp_dy = offsets[index]
                 jpeg = render_stamped_page_jpeg(
                     paths,
                     stamp_label(template, evidence_number, branch_number(index, len(counts))),
@@ -505,11 +755,20 @@ class Session:
                     tilt=rotations[index],
                     split=split,
                     pages=tuple(output_refs),
+                    grayscale=grayscale,
+                    stamp_dx=stamp_dx,
+                    stamp_dy=stamp_dy,
+                    masks=masks,
+                    trims=trim_map,
+                    skews=skew_map,
                 )
                 thumb = base64.b64encode(jpeg).decode("ascii")
             elif source_refs:
                 source, page, part = source_refs[0]
-                jpeg = render_piece_jpeg(paths, source, page, part, zoom=0.48, tilt=rotations[index])
+                jpeg = render_piece_jpeg(
+                    paths, source, page, part, zoom=0.48, tilt=rotations[index],
+                    grayscale=grayscale, masks=masks, trims=trim_map, skews=skew_map,
+                )
                 thumb = base64.b64encode(jpeg).decode("ascii")
             if thumb and not first_thumb:
                 first_thumb = thumb
@@ -523,9 +782,9 @@ class Session:
             "slots": slots,
         }
 
-    def preview(self, number: int, slot_index: int, page_index: int, zoom: float = 1.15) -> dict:
+    def preview(self, number: int, slot_index: int, page_index: int, zoom: float = 1.15, bare: bool = False) -> dict:
         from .plan import jobs_from_layout
-        from .stamp import render_stamped_page_jpeg
+        from .stamp import render_stamped_page_jpeg, skew_lookup, trim_lookup
 
         with self._lock:
             folder = self.folder if self.folder is not None else Path(".")
@@ -550,6 +809,14 @@ class Session:
             tilt=tilt,
             split=split,
             pages=pages,
+            grayscale=layout.grayscale,
+            stamp_dx=job.stamp_dx,
+            stamp_dy=job.stamp_dy,
+            draw_stamp=not bare,
+            # 編集画面の黒は要素が描く。ここに焼くと、X で外した直後に下の画像が残る。
+            masks=(),
+            trims=trim_lookup(job.trims),
+            skews=skew_lookup(job.skews),
         )
         return {
             "image": base64.b64encode(jpeg).decode("ascii"),
@@ -558,7 +825,7 @@ class Session:
         }
 
     def piece(self, number: int, source: int, page: int, part: int, zoom: float = 0.45, slot_index: int | None = None) -> dict:
-        from .stamp import render_piece_jpeg
+        from .stamp import render_piece_jpeg, skew_lookup, trim_lookup
 
         with self._lock:
             card = self._card(int(number))
@@ -569,7 +836,22 @@ class Session:
                 slot_index = int(slot_index)
                 _check_slot(card, slot_index)
                 tilt = card.slots[slot_index].rotation
-        jpeg = render_piece_jpeg(paths, int(source), int(page), int(part), zoom=_clamp_zoom(zoom), tilt=tilt)
+            grayscale = self.layout.grayscale
+            masks = card.masks
+            trims = trim_lookup(card.trims)
+            skews = skew_lookup(card.skews)
+        jpeg = render_piece_jpeg(
+            paths,
+            int(source),
+            int(page),
+            int(part),
+            zoom=_clamp_zoom(zoom),
+            tilt=tilt,
+            grayscale=grayscale,
+            masks=masks,
+            trims=trims,
+            skews=skews,
+        )
         return {"image": base64.b64encode(jpeg).decode("ascii")}
 
     def generate(self) -> dict:
@@ -583,6 +865,7 @@ class Session:
             folder = self.folder
             layout = self.layout
             last_written = layout.last_written
+            grayscale = layout.grayscale
         built = jobs_from_layout(layout, folder)
         try:
             result = write_jobs(
@@ -590,6 +873,7 @@ class Session:
                 built.jobs,
                 last_written=last_written,
                 preserve=built.preserve,
+                grayscale=grayscale,
             )
         except StampFontMissing as exc:
             return {"ok": False, **self.view(), "message": str(exc)}
@@ -605,18 +889,19 @@ class Session:
                 cards=self.layout.cards,
                 last_written=result["keep"],
                 label_template=self.layout.label_template,
+                grayscale=self.layout.grayscale,
             )
             self._persist()
             written = len(result["written"])
             failed = len(result["errors"]) + len(built.errors)
             if written and failed:
-                message = f"{written}件を {folder / '証拠'} に保存しました。{failed}件は保存できませんでした。"
+                message = f"{written}件を {folder / OUTPUT_DIR_NAME} に保存しました。{failed}件は保存できませんでした。"
             elif failed:
                 message = "保存できませんでした。"
             elif not written:
                 message = "保存するPDFがありません。"
             else:
-                message = f"{written}件を {folder / '証拠'} に保存しました。"
+                message = f"{written}件を {folder / OUTPUT_DIR_NAME} に保存しました。"
             return {
                 "ok": failed == 0,
                 "written": result["written"],
@@ -685,6 +970,7 @@ class Session:
             cards=cards,
             last_written=self.layout.last_written,
             label_template=self.layout.label_template,
+            grayscale=self.layout.grayscale,
         )
 
     def _persist(self) -> None:
@@ -714,6 +1000,22 @@ class Session:
         return list(natural), [len(slot.files) for slot in card.slots]
 
 
+def _whole(value) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("原本のページが見つかりません。")
+    return value
+
+
+def _point(value) -> int:
+    if isinstance(value, bool):
+        raise ValueError("印の位置の指定が不正です。")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    raise ValueError("印の位置の指定が不正です。")
+
+
 def directory_message() -> str:
     return "フォルダを確認できません。"
 
@@ -730,6 +1032,9 @@ def _extract_slot(card: Card, slot_index: int) -> tuple[Card, Card]:
         split_a4=card.split_a4,
         slots=(card.slots[slot_index],),
         pages=_pages_for_extracted_slot(card.pages, start, removed),
+        masks=_sources_in_span(card.masks, start, removed),
+        trims=_sources_in_span(card.trims, start, removed),
+        skews=_sources_in_span(card.skews, start, removed),
     )
     return pulled, _without_slot(card, slot_index)
 
@@ -765,7 +1070,14 @@ def _without_slot(card: Card, slot_index: int) -> Card:
     removed = len(card.slots[slot_index].files)
     deleted_group = slot_index + 1
     slots = card.slots[:slot_index] + card.slots[slot_index + 1 :]
-    return _replace(card, slots=slots, pages=_pages_after_slot_removed(card.pages, start, removed, deleted_group, len(slots)))
+    return _replace(
+        card,
+        slots=slots,
+        pages=_pages_after_slot_removed(card.pages, start, removed, deleted_group, len(slots)),
+        masks=_drop_sources(card.masks, start, removed, 0),
+        trims=_drop_sources(card.trims, start, removed, 0),
+        skews=_drop_sources(card.skews, start, removed, 0),
+    )
 
 
 def _pages_after_slot_removed(pages, start: int, removed: int, deleted_group: int, slots_left: int):
@@ -794,9 +1106,113 @@ def _replace(card: Card, **changes) -> Card:
         "split_a4": card.split_a4,
         "slots": card.slots,
         "pages": card.pages,
+        "masks": card.masks,
+        "trims": card.trims,
+        "skews": card.skews,
     }
     data.update(changes)
     return Card(**data)
+
+
+def _shift_sources(rows, insert_at: int):
+    if not rows:
+        return rows
+    return tuple(
+        replace(row, source=row.source + 1) if row.source >= insert_at else row
+        for row in rows
+    )
+
+
+def _sources_in_span(rows, start: int, count: int):
+    return tuple(
+        replace(row, source=row.source - start)
+        for row in rows
+        if start <= row.source < start + count
+    )
+
+
+def _drop_sources(rows, start: int, old_count: int, new_count: int):
+    if not rows:
+        return rows
+    delta = new_count - old_count
+    kept = []
+    for row in rows:
+        if start <= row.source < start + old_count:
+            continue
+        source = row.source + delta if row.source >= start + old_count else row.source
+        kept.append(row if source == row.source else replace(row, source=source))
+    return tuple(kept)
+
+
+def _output_span(x, y, w, h) -> tuple[float, float, float, float]:
+    values = []
+    for value in (x, y, w, h):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("マスキングの範囲が不正です。")
+        values.append(float(value))
+    left, top, width, height = values
+    if width < 0:
+        left += width
+        width = -width
+    if height < 0:
+        top += height
+        height = -height
+    if width < 4 or height < 4:
+        raise ValueError("マスキングできる範囲がありません。")
+    return left, top, width, height
+
+
+def _mask_identity(source, page, x, y, w, h) -> tuple:
+    return (int(source), int(page), round(float(x), 2), round(float(y), 2), round(float(w), 2), round(float(h), 2))
+
+
+def _skew_tenths(card: Card, source: int, page: int) -> int:
+    found = next((row.tenths for row in card.skews if row.source == source and row.page == page), 0)
+    return int(found)
+
+
+def _project_masks(paths, masks, refs, tilt: int, skews=()) -> list[dict]:
+    from .stamp import open_source, output_mask_from_source
+
+    if not masks or not refs:
+        return []
+    opened = {}
+    views = []
+    try:
+        for source, page, part in refs:
+            wanted = [mask for mask in masks if mask.source == int(source) and mask.page == int(page)]
+            if not wanted or int(source) < 0 or int(source) >= len(paths):
+                continue
+            document = opened.get(int(source))
+            if document is None:
+                document = open_source(paths[int(source)])
+                opened[int(source)] = document
+            if int(page) < 0 or int(page) >= document.page_count:
+                continue
+            tenths = next((row.tenths for row in skews if row.source == int(source) and row.page == int(page)), 0)
+            for mask in wanted:
+                box = output_mask_from_source(
+                    document[int(page)], int(part), tilt, mask.x, mask.y, mask.w, mask.h, int(tenths),
+                )
+                if box is None:
+                    continue
+                views.append({
+                    "source": mask.source,
+                    "page": mask.page,
+                    "part": int(part),
+                    "x": box[0],
+                    "y": box[1],
+                    "w": box[2],
+                    "h": box[3],
+                    "sx": mask.x,
+                    "sy": mask.y,
+                    "sw": mask.w,
+                    "sh": mask.h,
+                })
+    finally:
+        for document in opened.values():
+            document.close()
+    return views
 
 
 def _shift(pages: tuple[PageRow, ...] | None, insert_at: int) -> tuple[PageRow, ...] | None:
@@ -922,9 +1338,55 @@ def _rows(pages: tuple[PageRow, ...] | None) -> list[dict]:
     ]
 
 
-def _piece(ref: tuple[int, int, int], group: int) -> dict:
+def _piece(ref: tuple[int, int, int], group: int, trims, boxes, skews=()) -> dict:
     source, page, part = ref
-    return {"source": source, "page": page, "part": part, "group": group}
+    found = next(
+        (row for row in trims if row.source == source and row.page == page and row.part == part),
+        None,
+    )
+    angle = next((row.tenths for row in skews if row.source == source and row.page == page), 0)
+    payload = {
+        "source": source,
+        "page": page,
+        "part": part,
+        "group": group,
+        "trim": {
+            "top": 0 if found is None else found.top,
+            "right": 0 if found is None else found.right,
+            "bottom": 0 if found is None else found.bottom,
+            "left": 0 if found is None else found.left,
+        },
+        "skewTenths": int(angle),
+    }
+    box = boxes.get((source, page, part))
+    if box is not None:
+        payload["imageBox"] = box
+    return payload
+
+
+def _image_boxes(paths, refs, tilt: int) -> dict:
+    from .stamp import image_box_for_piece, open_source
+
+    opened = {}
+    boxes = {}
+    try:
+        for source, page, part in refs:
+            source = int(source)
+            page = int(page)
+            part = int(part)
+            if source < 0 or source >= len(paths):
+                continue
+            document = opened.get(source)
+            if document is None:
+                document = open_source(paths[source])
+                opened[source] = document
+            if page < 0 or page >= document.page_count:
+                continue
+            boxes[(source, page, part)] = image_box_for_piece(document[page], part, tilt)
+    finally:
+        for document in opened.values():
+            document.close()
+    return boxes
 
 
 def _job_page_count(job) -> int:

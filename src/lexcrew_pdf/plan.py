@@ -19,6 +19,11 @@ class OutputJob:
     split_a4: bool
     pages: tuple[tuple[int, int, int], ...] | None
     slot_index: int = 0
+    stamp_dx: int = 0
+    stamp_dy: int = 0
+    masks: tuple = ()
+    trims: tuple = ()
+    skews: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -75,6 +80,11 @@ def _jobs_for_card(series: str, card: Card, folder: Path) -> tuple[list[OutputJo
             split_a4=card.split_a4,
             pages=pages,
             slot_index=group - 1,
+            stamp_dx=slot.stamp_dx,
+            stamp_dy=slot.stamp_dy,
+            masks=card.masks,
+            trims=card.trims,
+            skews=card.skews,
         ))
     return jobs, [], []
 

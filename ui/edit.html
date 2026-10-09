@@ -24,7 +24,21 @@
     }
     h1 { margin: 0; font-size: 15px; }
     .tools, .zoom { display: flex; align-items: center; gap: 6px; }
+    .tools { flex-wrap: wrap; justify-content: flex-end; }
     #zoom-label { min-width: 4.5em; }
+    .skew {
+      display: inline-flex;
+      align-items: center;
+      gap: 0;
+    }
+    .skew .btn { min-width: 1.6em; padding: 2px 6px; }
+    .skew span {
+      padding: 0 4px;
+      white-space: nowrap;
+      font-variant-numeric: tabular-nums;
+      user-select: none;
+    }
+    .skew span.is-resettable { cursor: pointer; }
     button, input { font: inherit; }
     .btn {
       border: 1px solid #c5d2ea;
@@ -96,17 +110,156 @@
       background: #5c6570;
     }
     .sheet {
+      position: relative;
       width: calc(100% - 32px);
       margin: 16px auto;
       background: #fff;
       box-shadow: 0 2px 12px rgba(0, 0, 0, 0.28);
     }
-    .sheet img {
+    .sheet img.page {
       display: block;
       width: 100%;
       aspect-ratio: 210 / 297;
       object-fit: contain;
       background: #fff;
+    }
+    .skew-preview {
+      position: absolute;
+      z-index: 1;
+      overflow: hidden;
+      pointer-events: none;
+    }
+    .skew-preview img {
+      position: absolute;
+      display: block;
+      max-width: none;
+      pointer-events: none;
+    }
+    #mask.is-on {
+      background: #1a2438;
+      color: #fff;
+    }
+    body.is-masking #pages { cursor: crosshair; }
+    body.is-masking .stamp { pointer-events: none; }
+    .mask {
+      position: absolute;
+      z-index: 2;
+      background: #000;
+      pointer-events: none;
+    }
+    .mask.is-draft { background: rgba(0, 0, 0, 0.45); }
+    .mask-x {
+      position: absolute;
+      z-index: 5;
+      width: 22px;
+      height: 22px;
+      transform: translate(-50%, -50%);
+      border: 0;
+      border-radius: 11px;
+      background: rgba(16, 24, 40, 0.72);
+      color: #fff;
+      cursor: pointer;
+      line-height: 22px;
+      padding: 0;
+      pointer-events: auto;
+    }
+    .stamp {
+      position: absolute;
+      z-index: 4;
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      border-style: solid;
+      border-color: transparent;
+      background: transparent;
+      color: #f00;
+      font-family: "Yu Mincho", "YuMincho", "游明朝", serif;
+      font-weight: 600;
+      line-height: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+      touch-action: none;
+      white-space: nowrap;
+    }
+    .stamp.is-live {
+      border-color: #f00;
+      cursor: grabbing;
+    }
+    .stamp:disabled { cursor: default; }
+    .trim-band {
+      position: absolute;
+      z-index: 3;
+      background: #fff;
+      pointer-events: none;
+    }
+    .trim-bar {
+      position: absolute;
+      z-index: 6;
+      margin: 0;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      touch-action: none;
+      overflow: visible;
+    }
+    .trim-bar.is-top,
+    .trim-bar.is-bottom {
+      height: 14px;
+      transform: translateY(-50%);
+      cursor: ns-resize;
+    }
+    .trim-bar.is-left,
+    .trim-bar.is-right {
+      width: 14px;
+      transform: translateX(-50%);
+      cursor: ew-resize;
+    }
+    .trim-bar:disabled { cursor: default; }
+    .trim-bar::before {
+      content: "";
+      position: absolute;
+      background: #1d4f91;
+      box-shadow: 0 0 0 1px #fff;
+      pointer-events: none;
+    }
+    .trim-bar.is-top::before,
+    .trim-bar.is-bottom::before {
+      left: 0;
+      right: 0;
+      top: 6px;
+      height: 2px;
+    }
+    .trim-bar.is-left::before,
+    .trim-bar.is-right::before {
+      top: 0;
+      bottom: 0;
+      left: 6px;
+      width: 2px;
+    }
+    .trim-label {
+      position: absolute;
+      z-index: 1;
+      padding: 0 4px;
+      border-radius: 3px;
+      background: rgba(16, 24, 40, 0.72);
+      color: #fff;
+      font-size: 11px;
+      line-height: 16px;
+      pointer-events: none;
+      white-space: nowrap;
+    }
+    .trim-bar.is-top .trim-label { left: 8px; top: 12px; }
+    .trim-bar.is-bottom .trim-label { left: 8px; bottom: 12px; }
+    .trim-bar.is-left .trim-label { top: 8px; left: 12px; }
+    .trim-bar.is-right .trim-label { top: 8px; right: 12px; }
+    .stamp-preload {
+      position: absolute;
+      width: 0;
+      height: 0;
+      opacity: 0;
+      pointer-events: none;
     }
   </style>
 </head>
@@ -115,11 +268,18 @@
   <header>
     <h1 id="heading">ページ編集</h1>
     <div class="tools">
+      <button id="mask" class="btn" type="button" aria-pressed="false">マスキング</button>
+      <div class="skew" role="group" aria-label="傾き">
+        <button id="skew-left" class="btn" type="button" aria-label="左へ0.1度">◁</button>
+        <span id="skew-readout">傾き0.0°</span>
+        <button id="skew-right" class="btn" type="button" aria-label="右へ0.1度">▷</button>
+      </div>
       <div class="zoom">
         <button id="zoom-out" class="btn" type="button" aria-label="縮小">−</button>
         <button id="zoom-label" class="btn" type="button" aria-label="幅に合わせる">100%</button>
         <button id="zoom-in" class="btn" type="button" aria-label="拡大">＋</button>
       </div>
+      <button id="trim-clear" class="btn" type="button">トリムクリア</button>
       <button id="reset" class="btn" type="button">元に戻す</button>
     </div>
   </header>

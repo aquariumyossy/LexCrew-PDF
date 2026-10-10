@@ -231,12 +231,68 @@ def _chosen_style(style: StampStyle | None) -> StampStyle:
     return style or DEFAULT_STAMP
 
 
+_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png"}
+# 下端中央。本文の配置は変えず、文字幅だけの白い下地に載せる。
+PAGE_NUMBER_SIZE = 8
+PAGE_NUMBER_MARGIN = 10
+
+
 def open_source(path: str):
-    """原本はメモリへ読んでから開く。ファイルを掴んだままだと、同じPDFを再度選べない。"""
-    data = Path(path).read_bytes()
-    document = fitz.open(stream=data, filetype="pdf")
+    """原本はメモリへ読んでから開く。ファイルを掴んだままだと、同じPDFを再度選べない。
+
+    JPG と PNG は、向きを反映した A4 の1ページにしてから、PDF と同じ経路に乗せる。
+    """
+    file_path = Path(path)
+    data = file_path.read_bytes()
+    suffix = file_path.suffix.lower()
+    if suffix in _IMAGE_SUFFIXES:
+        document = _image_bytes_to_a4(data, suffix)
+    else:
+        document = fitz.open(stream=data, filetype="pdf")
     document._lex_bytes = data
     return document
+
+
+def _image_bytes_to_a4(data: bytes, suffix: str):
+    """画像を1ページの PDF にする。EXIF の回転は開き直したページの向きに入っている。
+
+    画素はそのまま埋め、用紙より大きくしない。小さい画像は縦の A4 の中央に置く。
+    横長の A4 か A3 に近いときだけ、その横の用紙にして、見開きの分割が使えるようにする。
+    """
+    filetype = "png" if suffix == ".png" else "jpeg"
+    try:
+        image = fitz.open(stream=data, filetype=filetype)
+    except Exception as exc:
+        raise ValueError("画像を開けません。") from exc
+    try:
+        if image.page_count < 1:
+            raise ValueError("画像を開けません。")
+        try:
+            pdf_bytes = image.convert_to_pdf()
+        except Exception as exc:
+            raise ValueError("画像を開けません。") from exc
+    finally:
+        image.close()
+    source = fitz.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        if source.page_count < 1:
+            raise ValueError("画像を開けません。")
+        natural = fitz.Rect(source[0].rect)
+        if natural.width < 1 or natural.height < 1:
+            raise ValueError("画像を開けません。")
+        sheet = _image_sheet(natural)
+        factor = min(sheet.width / natural.width, sheet.height / natural.height, 1.0)
+        placed_w = natural.width * factor
+        placed_h = natural.height * factor
+        left = sheet.x0 + (sheet.width - placed_w) / 2
+        top = sheet.y0 + (sheet.height - placed_h) / 2
+        dest = fitz.Rect(left, top, left + placed_w, top + placed_h)
+        output = fitz.open()
+        page = output.new_page(width=sheet.width, height=sheet.height)
+        page.show_pdf_page(dest, source, 0, keep_proportion=True)
+        return output
+    finally:
+        source.close()
 
 
 def count_pdf_pages(paths: tuple[str, ...] | list[str]) -> int:
@@ -278,6 +334,17 @@ def _viewed_size(rect, tilt: int) -> tuple[float, float]:
     if int(tilt or 0) % 360 in (90, 270):
         return height, width
     return width, height
+
+
+def _image_sheet(natural: fitz.Rect):
+    """横長の A3 か A4 に近い画像は、その横用紙。それ以外は縦の A4。"""
+    width = float(natural.width)
+    height = float(natural.height)
+    if _landscape_sheet(width, height) and _near_side(width, _A3_LONG_PT):
+        return fitz.paper_rect("a3-l")
+    if _landscape_sheet(width, height):
+        return fitz.paper_rect("a4-l")
+    return fitz.paper_rect("a4")
 
 
 def _landscape_sheet(width: float, height: float) -> bool:
@@ -390,6 +457,7 @@ def stamp_sources_to_pdf(
     skews: dict[tuple[int, int], int] | None = None,
     style: StampStyle | None = None,
     parts=None,
+    page_numbers: bool = False,
 ) -> bytes:
     """原本を順にA4縦へ載せる。証拠番号は出力の1ページ目だけに押す。
 
@@ -403,6 +471,7 @@ def stamp_sources_to_pdf(
     trims は (原本, ページ, 部分) ごとの四辺。端はクリップで落とし、中身は拡大しない。
     skews は (原本, ページ) ごとの右回り十分の一度。分割した左右は同じ角度。印は回さない。
     style を省いたときは赤、11 ポイント、明朝。
+    page_numbers のときは、この出力のページを 1 から「1 / 15」のように振る。枝番をまとめたファイルも通して振る。
     """
     if not source_paths:
         raise ValueError("原本がありません。")
@@ -442,7 +511,10 @@ def stamp_sources_to_pdf(
             place_run(label, tilt, pages, stamp_dx, stamp_dy)
         if placed <= 0:
             raise ValueError("ページがありません。")
-        return output.tobytes()
+        if page_numbers:
+            _draw_page_numbers(output)
+        _clear_output_metadata(output)
+        return output.tobytes(garbage=4)
     finally:
         output.close()
 
@@ -986,6 +1058,57 @@ def _trim_for(trims, source_index: int, page_index: int, part: int) -> PageTrim 
     if found is None or found.is_zero():
         return None
     return found
+
+
+def _draw_page_numbers(output) -> None:
+    """出力ファイルの下端中央へ、そのファイルのページ数で「1 / 15」と書く。"""
+    total = output.page_count
+    if total < 1:
+        return
+    font = fitz.Font("helv")
+    for index, page in enumerate(output, start=1):
+        label = f"{index} / {total}"
+        width = font.text_length(label, fontsize=PAGE_NUMBER_SIZE)
+        baseline = page.rect.y1 - PAGE_NUMBER_MARGIN
+        x = page.rect.x0 + (page.rect.width - width) / 2
+        plate = fitz.Rect(x - 2, baseline - PAGE_NUMBER_SIZE - 1, x + width + 2, baseline + 2)
+        page.draw_rect(plate, color=None, fill=(1, 1, 1), width=0)
+        page.insert_text(
+            fitz.Point(x, baseline),
+            label,
+            fontname="helv",
+            fontsize=PAGE_NUMBER_SIZE,
+            color=(0, 0, 0),
+        )
+
+
+def _clear_output_metadata(document) -> None:
+    """文書情報、XMP、添付、注釈、JavaScript を出力から外す。
+
+    ページは新しい文書に載せるが、写った情報や後から付いたものは残さない。
+    """
+    for page in document:
+        while page.first_annot:
+            page.delete_annot(page.first_annot)
+        for key in ("AA", "Metadata"):
+            if document.xref_get_key(page.xref, key)[0] != "null":
+                document.xref_set_key(page.xref, key, "null")
+    for name in list(document.embfile_names()):
+        document.embfile_del(name)
+    document.set_metadata({})
+    document.del_xml_metadata()
+    catalog = document.pdf_catalog()
+    for key in ("OpenAction", "AA", "Metadata"):
+        if document.xref_get_key(catalog, key)[0] != "null":
+            document.xref_set_key(catalog, key, "null")
+    if document.xref_get_key(catalog, "Names")[0] != "null":
+        document.xref_set_key(catalog, "Names", "null")
+    for xref in range(1, document.xref_length()):
+        try:
+            if document.xref_get_key(xref, "S")[1] == "/JavaScript":
+                document.update_object(xref, "<<>>")
+        except Exception:
+            continue
 
 
 def _bake_display_rotation(page) -> None:

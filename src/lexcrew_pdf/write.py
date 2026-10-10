@@ -17,6 +17,7 @@ def write_jobs(
     preserve: tuple[str, ...] | list[str] = (),
     grayscale: bool = False,
     style=None,
+    page_numbers: bool = False,
 ) -> dict:
     """ジョブを書き、last_written から外れた前回分だけを消す。
 
@@ -45,6 +46,7 @@ def write_jobs(
                 skews=skew_lookup(job.skews),
                 style=style,
                 parts=job.parts or None,
+                page_numbers=page_numbers,
             )
             dest.mkdir(parents=True, exist_ok=True)
             target = _checked_output_path(dest, job.filename)

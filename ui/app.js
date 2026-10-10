@@ -63,6 +63,10 @@ function render() {
   const gray = Boolean(view.grayscale);
   grayscale.classList.toggle("is-on", gray);
   grayscale.setAttribute("aria-pressed", gray ? "true" : "false");
+  const pageNumbers = document.getElementById("page-numbers");
+  const numbered = Boolean(view.pageNumbers);
+  pageNumbers.classList.toggle("is-on", numbered);
+  pageNumbers.setAttribute("aria-pressed", numbered ? "true" : "false");
   document.getElementById("generate").disabled = generating;
   document.getElementById("clear").disabled = generating;
   const root = document.getElementById("cards");
@@ -553,10 +557,17 @@ document.getElementById("grayscale").addEventListener("click", async () => {
   applyView(result);
 });
 
+document.getElementById("page-numbers").addEventListener("click", async () => {
+  if (!api || !view) return;
+  const result = await api.set_page_numbers(!view.pageNumbers);
+  if (result && result.ok === false && result.message) showBanner(result.message);
+  applyView(result);
+});
+
 document.getElementById("clear").addEventListener("click", async () => {
   if (!api || generating) return;
   const editing = Boolean(view && view.editor);
-  let message = "カードを初期状態に戻します。原本、書名、枝番、追加したカード、ページ順、番号の種類、開始番号、枝番のまとめ、白黒、印の色、印の大きさ、印のフォントは消え、甲第１号証から甲第６号証の空のカードになります。生成済みの証拠PDFは残ります。";
+  let message = "カードを初期状態に戻します。原本、書名、枝番、追加したカード、ページ順、番号の種類、開始番号、枝番のまとめ、白黒、ページ番号、印の色、印の大きさ、印のフォントは消え、甲第１号証から甲第６号証の空のカードになります。生成済みの証拠PDFは残ります。";
   if (editing) message += "開いている編集ウィンドウも閉じます。";
   if (!window.confirm(message)) return;
   const button = document.getElementById("clear");

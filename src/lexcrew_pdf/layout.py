@@ -19,6 +19,8 @@ from .stamp import DEFAULT_STAMP, StampStyle, stamp_record, stamp_style_from_jso
 LAYOUT_NAME = "layout.json"
 OUTPUT_DIR_NAME = "LexCrew-PDF-Downloads"
 LEGACY_OUTPUT_DIR_NAMES = ("LexCrew-PDF", "証拠")
+ACCEPTED_SOURCE_SUFFIXES = (".pdf", ".jpg", ".jpeg", ".png")
+FILE_DIALOG_TYPES = ("PDFと画像 (*.pdf;*.jpg;*.jpeg;*.png)",)
 
 
 @dataclass(frozen=True)
@@ -91,6 +93,7 @@ class Layout:
     stamp: StampStyle = DEFAULT_STAMP
     merge_branches: bool = True
     first_number: int = 1
+    page_numbers: bool = False
 
 
 def default_layout() -> Layout:
@@ -104,6 +107,7 @@ def default_layout() -> Layout:
         stamp=DEFAULT_STAMP,
         merge_branches=True,
         first_number=1,
+        page_numbers=False,
     )
 
 
@@ -238,6 +242,8 @@ def parse_layout(raw: dict) -> Layout:
     first_number = raw.get("firstNumber", 1)
     if isinstance(first_number, bool) or not isinstance(first_number, int) or not 1 <= first_number <= FIRST_NUMBER_MAX:
         raise ValueError("配置ファイルを読めません。")
+    if "pageNumbers" in raw and raw.get("pageNumbers") is not True and raw.get("pageNumbers") is not False:
+        raise ValueError("配置ファイルを読めません。")
     return Layout(
         series=series,
         enabled_series=enabled_series,
@@ -248,6 +254,7 @@ def parse_layout(raw: dict) -> Layout:
         stamp=stamp,
         merge_branches=merge_branches,
         first_number=first_number,
+        page_numbers=raw.get("pageNumbers") is True,
     )
 
 
@@ -315,18 +322,28 @@ def layout_to_json(layout: Layout) -> dict:
         payload["mergeBranches"] = False
     if layout.first_number != 1:
         payload["firstNumber"] = layout.first_number
+    if layout.page_numbers:
+        payload["pageNumbers"] = True
     record = stamp_record(layout.stamp)
     if record is not None:
         payload["stamp"] = record
     return payload
 
 
+def require_source_file(file_path: Path) -> None:
+    """PDF、JPG、PNG だけを受け付ける。HEIC は対象外。"""
+    if not file_path.is_file():
+        raise ValueError("ファイルが見つかりません。")
+    suffix = file_path.suffix.lower()
+    if suffix in {".heic", ".heif"}:
+        raise ValueError("HEICには対応していません。PDF、JPG、PNGを選んでください。")
+    if suffix not in ACCEPTED_SOURCE_SUFFIXES:
+        raise ValueError("対応していない形式です。PDF、JPG、PNGを選んでください。")
+
+
 def store_path(folder: Path, file_path: Path) -> str:
     """指定フォルダの中は相対パス、外は絶対パス。`..` は拒否する。"""
-    if not file_path.is_file():
-        raise ValueError("PDFが見つかりません。")
-    if file_path.suffix.lower() != ".pdf":
-        raise ValueError("PDFを選んでください。")
+    require_source_file(file_path)
     folder_resolved = folder.resolve()
     resolved = file_path.resolve()
     try:

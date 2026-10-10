@@ -31,6 +31,7 @@ from .layout import (
     default_layout,
     layout_path,
     load_layout,
+    require_source_file,
     save_layout,
     store_path,
     with_next_series,
@@ -140,6 +141,7 @@ class Session:
             "grayscale": self.layout.grayscale,
             "mergeBranches": self.layout.merge_branches,
             "firstNumber": self.layout.first_number,
+            "pageNumbers": self.layout.page_numbers,
             "stamp": _stamp_view(self.layout.stamp),
             "enabledSeries": list(self.layout.enabled_series),
             "canAddSeries": len(self.layout.enabled_series) < 5,
@@ -315,6 +317,15 @@ class Session:
         return self.view()
 
     @_locked
+    def set_page_numbers(self, enabled: bool) -> dict:
+        chosen = enabled is True
+        if chosen == self.layout.page_numbers:
+            return self.view()
+        self.layout = replace(self.layout, page_numbers=chosen)
+        self._persist()
+        return self.view()
+
+    @_locked
     def set_first_number(self, number: int) -> dict:
         first = require_first_number(number)
         if first == self.layout.first_number:
@@ -459,6 +470,8 @@ class Session:
         self._guard(int(number))
         if not paths:
             return self.view()
+        for path in paths:
+            require_source_file(Path(path))
         if replace:
             return self.replace_slot(number, slot_index, paths)
         if file_index is None:
@@ -908,6 +921,7 @@ class Session:
             last_written = layout.last_written
             grayscale = layout.grayscale
             style = layout.stamp
+            page_numbers = layout.page_numbers
         built = jobs_from_layout(layout, folder)
         try:
             result = write_jobs(
@@ -917,6 +931,7 @@ class Session:
                 preserve=built.preserve,
                 grayscale=grayscale,
                 style=style,
+                page_numbers=page_numbers,
             )
         except StampFontMissing as exc:
             return {"ok": False, **self.view(), "message": str(exc)}
@@ -1048,12 +1063,11 @@ class Session:
             save_layout(self.folder, self.layout)
 
     def _store(self, file_path: str) -> str:
+        path = Path(file_path)
+        require_source_file(path)
         if self.folder is None:
-            path = Path(file_path)
-            if path.suffix.lower() != ".pdf" or not path.is_file():
-                raise ValueError("PDFを選んでください。")
             return str(path.resolve())
-        return store_path(self.folder, Path(file_path))
+        return store_path(self.folder, path)
 
     def _paths(self, card: Card) -> tuple[str, ...]:
         folder = self.folder or Path(".")

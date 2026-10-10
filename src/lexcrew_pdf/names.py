@@ -127,20 +127,30 @@ def exhibit_number(series: str, number: int, branch: int | None) -> str:
     return filename_prefix(series) + _number_token(number, branch, None)
 
 
+# 長いものから見る。.jpeg を .jpg より先に外す。
+_SOURCE_SUFFIXES = (".jpeg", ".jpg", ".png", ".pdf")
+
+
 def document_title(typed: str, first_file: str | None) -> str:
-    """保存した書名。空なら、その枝番の先頭 PDF から拡張子を除く。
+    """保存した書名。空なら、その枝番の先頭原本から拡張子を除く。
 
     原本名の先頭に号証番号があるときは外す。手入力の書名はそのまま残す。
+    PDF と同じく、JPG と PNG の拡張子も除く。
     """
     title = (typed or "").strip()
     if title:
         return title
     if not first_file:
         return ""
-    name = Path(first_file).name
-    if name.lower().endswith(".pdf"):
-        name = name[:-4]
-    return strip_leading_exhibit_number(name)
+    return strip_leading_exhibit_number(_without_source_suffix(Path(first_file).name))
+
+
+def _without_source_suffix(name: str) -> str:
+    lower = name.lower()
+    for suffix in _SOURCE_SUFFIXES:
+        if lower.endswith(suffix):
+            return name[: -len(suffix)]
+    return name
 
 
 def strip_leading_exhibit_number(name: str) -> str:

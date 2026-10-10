@@ -185,7 +185,7 @@ def test_excluded_middle_pages_are_not_merged_and_do_not_renumber(tmp_path, monk
     assert view["mergedFilename"] == "甲001-1~3 一.pdf"
     assert view["mergeWarning"] == ""
 
-    def fake_write(folder, jobs, *, last_written, preserve=(), grayscale=False, style=None):
+    def fake_write(folder, jobs, *, last_written, preserve=(), grayscale=False, style=None, page_numbers=False):
         return {
             "written": [{"filename": job.filename} for job in jobs],
             "errors": [],

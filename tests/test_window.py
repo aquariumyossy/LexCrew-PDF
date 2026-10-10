@@ -121,7 +121,7 @@ def test_non_pdf_is_rejected(tmp_path):
     note = tmp_path / "memo.txt"
     note.write_text("no", encoding="utf-8")
     session = Session(tmp_path)
-    with pytest.raises(ValueError, match="PDFを選んでください"):
+    with pytest.raises(ValueError, match="対応していない形式です"):
         session.add_file(1, 0, str(note))
 
 

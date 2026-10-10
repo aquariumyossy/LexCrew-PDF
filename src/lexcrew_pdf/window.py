@@ -10,6 +10,7 @@ import unicodedata
 from ctypes import wintypes
 from pathlib import Path
 
+from .layout import FILE_DIALOG_TYPES, require_source_file
 from .session import Session, downloads_dir
 
 # ハンドルを関数の中だけに置くと、ガベージコレクションでミューテックスが外れる。
@@ -218,6 +219,9 @@ class Api:
     def set_merge_branches(self, enabled: bool) -> dict:
         return self._run(lambda: self.session.set_merge_branches(bool(enabled)))
 
+    def set_page_numbers(self, enabled: bool) -> dict:
+        return self._run(lambda: self.session.set_page_numbers(bool(enabled)))
+
     def set_stamp_style(self, color, size, font) -> dict:
         from .stamp import StampFontMissing
 
@@ -274,12 +278,14 @@ class Api:
         chosen = self._window.create_file_dialog(
             webview.FileDialog.OPEN,
             allow_multiple=True,
-            file_types=("PDF (*.pdf)",),
+            file_types=FILE_DIALOG_TYPES,
         )
         if not chosen:
             return self.session.view()
 
         def apply():
+            for path in chosen:
+                require_source_file(Path(path))
             if replace:
                 return self.session.replace_slot(int(number), int(slot_index), list(chosen))
             view = self.session.view()

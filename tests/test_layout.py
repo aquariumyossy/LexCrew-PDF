@@ -373,7 +373,7 @@ def test_grayscale_is_omitted_when_off_and_kept_across_series(tmp_path, monkeypa
     assert session.layout.grayscale is True
     seen = {}
 
-    def fake_write(folder, jobs, *, last_written, preserve=(), grayscale=False, style=None):
+    def fake_write(folder, jobs, *, last_written, preserve=(), grayscale=False, style=None, page_numbers=False):
         seen["grayscale"] = grayscale
         name = jobs[0].filename
         return {"written": [{"filename": name, "stampLabel": jobs[0].stamp}], "errors": [], "keep": (name,)}
@@ -436,7 +436,7 @@ def test_stamp_style_is_omitted_when_default_and_survives_series_changes(tmp_pat
     assert session.layout.grayscale is True
     seen = {}
 
-    def fake_write(folder, jobs, *, last_written, preserve=(), grayscale=False, style=None):
+    def fake_write(folder, jobs, *, last_written, preserve=(), grayscale=False, style=None, page_numbers=False):
         seen["style"] = style
         name = jobs[0].filename
         return {"written": [{"filename": name, "stampLabel": jobs[0].stamp}], "errors": [], "keep": (name,)}

@@ -837,23 +837,38 @@ def _place_skewed_page(output, source, index: int, tilt: int, clip, trim: PageTr
 
     配置枠は90度だけで決める。小さい角度を同じ枠へ収めると四隅が空く。
     その枠の上右下左を切る。原本側のクリップでは、回したあとの辺に沿わない。
+    clip_to_rect は枠をまたぐ画像を残すので、同じ枠へ載せ直して画素を切る。
     """
     page = output.new_page(width=_a4().width, height=_a4().height)
     card = viewer_rotate(tilt)
     full = source[index].rect if clip is None else fitz.Rect(clip)
     fitted = fitted_image_rect(page.rect, full, card)
-    page.show_pdf_page(
-        fitted,
-        source,
-        index,
-        clip=clip,
-        keep_proportion=True,
-        rotate=card + skew_ccw_degrees(skew_tenths),
-    )
-    limit = None
-    if trim is not None and not trim.is_zero():
-        limit = _output_trim_rect(fitted, trim)
-        page.clip_to_rect(limit)
+    rotate = card + skew_ccw_degrees(skew_tenths)
+    limit = None if trim is None or trim.is_zero() else _output_trim_rect(fitted, trim)
+    if limit is None:
+        page.show_pdf_page(
+            fitted,
+            source,
+            index,
+            clip=clip,
+            keep_proportion=True,
+            rotate=rotate,
+        )
+        return page, None
+    work = fitz.open()
+    try:
+        held = work.new_page(width=page.rect.width, height=page.rect.height)
+        held.show_pdf_page(
+            fitted,
+            source,
+            index,
+            clip=clip,
+            keep_proportion=True,
+            rotate=rotate,
+        )
+        page.show_pdf_page(limit, work, 0, clip=limit, keep_proportion=True, rotate=0)
+    finally:
+        work.close()
     return page, limit
 
 

@@ -621,6 +621,7 @@ function paintStamp() {
   button.setAttribute("aria-label", `${stampLabel || "証拠番号"}の位置`);
   button.disabled = stampBusy;
   button.tabIndex = masking ? -1 : 0;
+  if (!trimDrag && !trimKeyPiece) paintTrimBands();
 }
 
 function reloadSheet(index) {
@@ -821,27 +822,76 @@ function shownTrim(piece) {
   return savedTrim(piece);
 }
 
-function trimBands(box, trim) {
+function stampHole() {
+  if (active !== 0 || !stampFrame) return null;
+  const offset = stampOffset();
+  const x = stampFrame.originX + offset.dx;
+  const y = stampFrame.originY + offset.dy;
+  return {
+    x: x / stampFrame.pageWidth,
+    y: y / stampFrame.pageHeight,
+    w: stampFrame.boxWidth / stampFrame.pageWidth,
+    h: stampFrame.boxHeight / stampFrame.pageHeight,
+  };
+}
+
+function trimRects(box, trim) {
   const top = trim.top / 1000;
   const right = trim.right / 1000;
   const bottom = trim.bottom / 1000;
   const left = trim.left / 1000;
   return [
-    { left: `${box.x * 100}%`, top: `${box.y * 100}%`, width: `${box.w * 100}%`, height: `${box.h * top * 100}%` },
-    {
-      left: `${(box.x + box.w * (1 - right)) * 100}%`,
-      top: `${box.y * 100}%`,
-      width: `${box.w * right * 100}%`,
-      height: `${box.h * 100}%`,
-    },
-    {
-      left: `${box.x * 100}%`,
-      top: `${(box.y + box.h * (1 - bottom)) * 100}%`,
-      width: `${box.w * 100}%`,
-      height: `${box.h * bottom * 100}%`,
-    },
-    { left: `${box.x * 100}%`, top: `${box.y * 100}%`, width: `${box.w * left * 100}%`, height: `${box.h * 100}%` },
-  ].filter((band) => !band.width.startsWith("0%") && !band.height.startsWith("0%"));
+    { x: box.x, y: box.y, w: box.w, h: box.h * top },
+    { x: box.x + box.w * (1 - right), y: box.y, w: box.w * right, h: box.h },
+    { x: box.x, y: box.y + box.h * (1 - bottom), w: box.w, h: box.h * bottom },
+    { x: box.x, y: box.y, w: box.w * left, h: box.h },
+  ].filter((band) => band.w > 0 && band.h > 0);
+}
+
+function subtractRect(band, hole) {
+  const x0 = Math.max(band.x, hole.x);
+  const y0 = Math.max(band.y, hole.y);
+  const x1 = Math.min(band.x + band.w, hole.x + hole.w);
+  const y1 = Math.min(band.y + band.h, hole.y + hole.h);
+  if (x1 <= x0 || y1 <= y0) return [band];
+  return [
+    { x: band.x, y: band.y, w: band.w, h: y0 - band.y },
+    { x: band.x, y: y1, w: band.w, h: band.y + band.h - y1 },
+    { x: band.x, y: y0, w: x0 - band.x, h: y1 - y0 },
+    { x: x1, y: y0, w: band.x + band.w - x1, h: y1 - y0 },
+  ].filter((piece) => piece.w > 0.0001 && piece.h > 0.0001);
+}
+
+function bandStyle(rect) {
+  return {
+    left: `${rect.x * 100}%`,
+    top: `${rect.y * 100}%`,
+    width: `${rect.w * 100}%`,
+    height: `${rect.h * 100}%`,
+  };
+}
+
+function trimBands(box, trim) {
+  // 止まっている印は JPEG に焼いてある。白い帯がそこを覆うと印が消える。
+  let rects = trimRects(box, trim);
+  const hole = stampHole();
+  if (hole) rects = rects.flatMap((band) => subtractRect(band, hole));
+  return rects.map(bandStyle);
+}
+
+function paintTrimBands() {
+  const piece = output[active];
+  const sheet = document.querySelector(`#pages .sheet[data-index="${active}"]`);
+  if (!piece || !sheet) return;
+  const trim = shownTrim(piece);
+  const box = savedBox(piece);
+  sheet.querySelectorAll(".trim-band").forEach((node) => node.remove());
+  for (const style of trimBands(box, trim)) {
+    const band = document.createElement("div");
+    band.className = "trim-band";
+    Object.assign(band.style, style);
+    sheet.appendChild(band);
+  }
 }
 
 function trimBarStyle(box, trim, edge) {
@@ -1071,14 +1121,9 @@ function paintTrim() {
     paintTrimClear();
     return;
   }
+  paintTrimBands();
   const trim = shownTrim(piece);
   const box = savedBox(piece);
-  for (const style of trimBands(box, trim)) {
-    const band = document.createElement("div");
-    band.className = "trim-band";
-    Object.assign(band.style, style);
-    sheet.appendChild(band);
-  }
   for (const [edge, label] of TRIM_EDGES) {
     const button = document.createElement("button");
     button.type = "button";
@@ -1114,15 +1159,9 @@ function syncTrimPaint() {
   const piece = output[active];
   const sheet = document.querySelector(`#pages .sheet[data-index="${active}"]`);
   if (!piece || !sheet) return;
+  paintTrimBands();
   const trim = shownTrim(piece);
   const box = savedBox(piece);
-  sheet.querySelectorAll(".trim-band").forEach((node) => node.remove());
-  for (const style of trimBands(box, trim)) {
-    const band = document.createElement("div");
-    band.className = "trim-band";
-    Object.assign(band.style, style);
-    sheet.appendChild(band);
-  }
   for (const [edge] of TRIM_EDGES) {
     const button = sheet.querySelector(`.trim-bar.is-${edge}`);
     if (!button) continue;

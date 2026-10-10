@@ -1033,6 +1033,99 @@ def test_clockwise_skew_keeps_vector_text_and_leaves_the_stamp(tmp_path):
         turned.close()
 
 
+def _write_scanned_page(path):
+    """全面を1枚の画像にする。上の帯と本文の印は同じ部品になる。"""
+    drawn = fitz.open()
+    page = drawn.new_page(width=595, height=842)
+    page.draw_rect(page.rect, color=None, fill=(1, 1, 1), width=0)
+    page.draw_rect(fitz.Rect(0, 0, 595, 28), color=None, fill=(0, 0, 0), width=0)
+    page.draw_rect(fitz.Rect(250, 400, 310, 450), color=None, fill=(0, 0, 0), width=0)
+    pixmap = page.get_pixmap(alpha=False)
+    document = fitz.open()
+    image = document.new_page(width=595, height=842)
+    image.insert_image(image.rect, pixmap=pixmap)
+    document.save(path)
+    document.close()
+    drawn.close()
+
+
+def _dark_in_rows(page, y0, y1):
+    """赤い印を除き、指定した行範囲の暗い画素の数と外接を返す。"""
+    pixmap = page.get_pixmap(matrix=fitz.Matrix(1, 1), alpha=False)
+    width, height, channels = pixmap.width, pixmap.height, pixmap.n
+    samples = pixmap.samples
+    start = max(0, int(y0))
+    stop = min(height, int(y1))
+    count = 0
+    min_x, min_y, max_x, max_y = width, height, -1, -1
+    for y in range(start, stop):
+        row = y * width * channels
+        for x in range(width):
+            index = row + x * channels
+            red, green, blue = samples[index], samples[index + 1], samples[index + 2]
+            if red > 180 and green < 80 and blue < 80:
+                continue
+            if max(red, green, blue) > 80:
+                continue
+            count += 1
+            min_x = min(min_x, x)
+            min_y = min(min_y, y)
+            max_x = max(max_x, x)
+            max_y = max(max_y, y)
+    box = None if count == 0 else (min_x, min_y, max_x, max_y)
+    return count, box
+
+
+def test_skew_trim_cuts_a_full_page_image_without_moving_the_body(tmp_path):
+    _require_font()
+    source = tmp_path / "scan.pdf"
+    _write_scanned_page(source)
+    for tenths, top in ((30, 100), (30, 400), (100, 100), (100, 400)):
+        plain = _open_stamped(
+            stamp_sources_to_pdf([str(source)], "甲第１号証", skews={(0, 0): tenths})
+        )
+        cropped = _open_stamped(
+            stamp_sources_to_pdf(
+                [str(source)],
+                "甲第１号証",
+                skews={(0, 0): tenths},
+                trims={(0, 0, 0): PageTrim(top=top)},
+            )
+        )
+        try:
+            cut = plain[0].rect.height * top / 1000
+            leaked, _box = _dark_in_rows(cropped[0], 0, cut - 2)
+            before_count, before_box = _dark_in_rows(plain[0], 0, cut - 2)
+            _below, body_before = _dark_in_rows(plain[0], 300, plain[0].rect.height)
+            _kept, body_after = _dark_in_rows(cropped[0], 300, cropped[0].rect.height)
+            assert before_count > 0
+            assert leaked == 0
+            assert body_before is not None and body_after is not None
+            for index in range(4):
+                assert abs(body_after[index] - body_before[index]) <= 1
+        finally:
+            plain.close()
+            cropped.close()
+    jpeg = fitz.open(
+        stream=render_piece_jpeg(
+            [str(source)],
+            0,
+            0,
+            0,
+            zoom=1,
+            trims={(0, 0, 0): PageTrim(top=100)},
+            skews={(0, 0): 100},
+        ),
+        filetype="jpeg",
+    )
+    try:
+        cut = jpeg[0].rect.height * 100 / 1000
+        leaked, _box = _dark_in_rows(jpeg[0], 0, cut - 2)
+        assert leaked == 0
+    finally:
+        jpeg.close()
+
+
 def test_skew_trim_cuts_the_output_top_without_rescaling_the_body(tmp_path):
     _require_font()
     source = tmp_path / "a.pdf"

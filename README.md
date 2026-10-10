@@ -90,7 +90,7 @@
 
 ## インストール（利用者向け）
 
-1. 配布物の `LexCrew-PDF-1.1.1-win64.zip` を全部展開します。zip の中のファイルを直接開かないでください
+1. 配布物の `LexCrew-PDF-1.1.2-win64.zip` を全部展開します。zip の中のファイルを直接開かないでください
 2. 展開したフォルダは、ドキュメントやデスクトップなど、書き込める場所に置きます。Program Files には置かないでください
 3. `LexCrew-PDF.bat` を一度実行します。デスクトップに朱色のアイコンが出て、アプリも開きます
 4. 次回からは、そのアイコンをクリックして起動します
@@ -123,7 +123,7 @@ py -3 -m venv .venv
 powershell -ExecutionPolicy Bypass -File packaging\build.ps1
 ```
 
-`-e` を付けると、`python -m lexcrew_pdf` が `src` のコードを直接読みます。`packaging\build.ps1` は `dist\LexCrew-PDF-1.1.1-win64.zip` を作ります。初回は埋め込みの Python を取得するため、インターネットが必要です。
+`-e` を付けると、`python -m lexcrew_pdf` が `src` のコードを直接読みます。`packaging\build.ps1` は `dist\LexCrew-PDF-1.1.2-win64.zip` を作ります。初回は埋め込みの Python を取得するため、インターネットが必要です。
 
 ### 主なディレクトリ
 

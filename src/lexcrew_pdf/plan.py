@@ -184,9 +184,13 @@ def _jobs_for_card(
         ))
     # 印の番号はカードの枝番のまま。空の枝番や、出すページの無い枝番で番号が飛ぶときは、
     # 1~3 のような範囲にせず、枝番ごとに出す。カードを消せば番号は詰まる。
+    page_counts = [
+        len(list(buckets.get(group) or []))
+        for group in range(GROUP_PRIMARY, len(card.slots) + 1)
+    ]
     if merge_branches and len(jobs) >= 2 and all(job.pages is not None for job in jobs):
         indexes = [job.slot_index for job in jobs]
-        if indexes == list(range(indexes[0], indexes[-1] + 1)):
+        if slots_share_one_file(page_counts):
             return [_merged_job(series, card, jobs, shown)], [], [], []
         missing = [index for index in range(indexes[0], indexes[-1] + 1) if index not in indexes]
         return jobs, [], [], [{
@@ -194,6 +198,30 @@ def _jobs_for_card(
             "message": branch_gap_warning(series, card, missing, shown),
         }]
     return jobs, [], [], []
+
+
+def slots_share_one_file(page_counts: list[int]) -> bool:
+    """出すページのある枝番が隣り合っているとき、1つの PDF にまとまる。"""
+    present = [index for index, count in enumerate(page_counts) if count > 0]
+    if len(present) < 2:
+        return False
+    return present == list(range(present[0], present[-1] + 1))
+
+
+def page_label(
+    page_counts: list[int],
+    slot_index: int,
+    page_index: int,
+) -> tuple[int, int] | None:
+    """この枝番の中の何ページ目か。1ページの枝番は None。まとめた PDF でも枝番ごとに数える。"""
+    slot_index = int(slot_index)
+    page_index = int(page_index)
+    if slot_index < 0 or slot_index >= len(page_counts) or page_index < 0:
+        return None
+    total = int(page_counts[slot_index])
+    if page_index >= total or total < 2:
+        return None
+    return page_index + 1, total
 
 
 def file_merge_choice(series: str, card: Card, merge_branches: bool, shown: int) -> MergeChoice:

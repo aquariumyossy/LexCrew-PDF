@@ -219,8 +219,19 @@ class Api:
     def set_merge_branches(self, enabled: bool) -> dict:
         return self._run(lambda: self.session.set_merge_branches(bool(enabled)))
 
-    def set_page_numbers(self, enabled: bool) -> dict:
-        return self._run(lambda: self.session.set_page_numbers(bool(enabled)))
+    def set_page_number_style(self, enabled, color, size, font, place, pattern="n/N") -> dict:
+        from .stamp import StampFontMissing
+
+        def save():
+            try:
+                return self.session.set_page_number_style(bool(enabled), color, size, font, place, pattern)
+            except StampFontMissing as exc:
+                return {**self.session.view(), "ok": False, "message": str(exc)}
+
+        view = self._run(save)
+        if view.get("ok") is not False:
+            self._notify_editor("window.reloadAppearance()")
+        return view
 
     def set_stamp_style(self, color, size, font) -> dict:
         from .stamp import StampFontMissing
@@ -330,9 +341,21 @@ class Api:
     def preview(self, number: int, slot_index: int, page_index: int, zoom: float = 1.15) -> dict:
         return self._run(lambda: self.session.preview(int(number), int(slot_index), int(page_index), float(zoom)))
 
-    def piece(self, number: int, source: int, page: int, part: int, zoom: float = 0.45, slot_index: int | None = None) -> dict:
+    def piece(
+        self,
+        number: int,
+        source: int,
+        page: int,
+        part: int,
+        zoom: float = 0.45,
+        slot_index: int | None = None,
+        output_index: int | None = None,
+    ) -> dict:
         slot = None if slot_index is None else int(slot_index)
-        return self._run(lambda: self.session.piece(int(number), int(source), int(page), int(part), float(zoom), slot))
+        index = None if output_index is None else int(output_index)
+        return self._run(lambda: self.session.piece(
+            int(number), int(source), int(page), int(part), float(zoom), slot, index,
+        ))
 
     def generate(self) -> dict:
         result = self._run(self.session.generate)
@@ -562,9 +585,21 @@ class EditorApi:
             int(number), int(slot_index), int(page_index), float(zoom), bool(bare),
         ))
 
-    def piece(self, number: int, source: int, page: int, part: int, zoom: float = 0.45, slot_index: int | None = None) -> dict:
+    def piece(
+        self,
+        number: int,
+        source: int,
+        page: int,
+        part: int,
+        zoom: float = 0.45,
+        slot_index: int | None = None,
+        output_index: int | None = None,
+    ) -> dict:
         slot = None if slot_index is None else int(slot_index)
-        return self._run(lambda: self.session.piece(int(number), int(source), int(page), int(part), float(zoom), slot))
+        index = None if output_index is None else int(output_index)
+        return self._run(lambda: self.session.piece(
+            int(number), int(source), int(page), int(part), float(zoom), slot, index,
+        ))
 
     def _run(self, fn):
         try:

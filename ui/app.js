@@ -64,7 +64,7 @@ function render() {
   grayscale.classList.toggle("is-on", gray);
   grayscale.setAttribute("aria-pressed", gray ? "true" : "false");
   const pageNumbers = document.getElementById("page-numbers");
-  const numbered = Boolean(view.pageNumbers);
+  const numbered = Boolean(view.pageNumbers && view.pageNumbers.enabled);
   pageNumbers.classList.toggle("is-on", numbered);
   pageNumbers.setAttribute("aria-pressed", numbered ? "true" : "false");
   document.getElementById("generate").disabled = generating;
@@ -557,17 +557,16 @@ document.getElementById("grayscale").addEventListener("click", async () => {
   applyView(result);
 });
 
-document.getElementById("page-numbers").addEventListener("click", async () => {
-  if (!api || !view) return;
-  const result = await api.set_page_numbers(!view.pageNumbers);
-  if (result && result.ok === false && result.message) showBanner(result.message);
-  applyView(result);
+document.getElementById("page-numbers").addEventListener("click", () => {
+  if (!view) return;
+  fillPageNumberDialog(view.pageNumbers);
+  pageNumberDialog.showModal();
 });
 
 document.getElementById("clear").addEventListener("click", async () => {
   if (!api || generating) return;
   const editing = Boolean(view && view.editor);
-  let message = "カードを初期状態に戻します。原本、書名、枝番、追加したカード、ページ順、番号の種類、開始番号、枝番のまとめ、白黒、ページ番号、印の色、印の大きさ、印のフォントは消え、甲第１号証から甲第６号証の空のカードになります。生成済みの証拠PDFは残ります。";
+  let message = "カードを初期状態に戻します。原本、書名、枝番、追加したカード、ページ順、番号の種類、開始番号、枝番のまとめ、白黒、頁番号、印の色、印の大きさ、印のフォントは消え、甲第１号証から甲第６号証の空のカードになります。生成済みの証拠PDFは残ります。";
   if (editing) message += "開いている編集ウィンドウも閉じます。";
   if (!window.confirm(message)) return;
   const button = document.getElementById("clear");
@@ -703,4 +702,155 @@ stampGothic.addEventListener("click", () => {
   stampGothic.classList.add("is-on");
   paintStampSample();
   saveStamp();
+});
+
+const pageNumberDialog = document.getElementById("page-number-settings");
+const pageNumberColors = [...document.querySelectorAll("#page-number-settings .page-number-color")];
+const pageNumberPlaces = [...document.querySelectorAll("#page-number-settings .page-number-place")];
+const pageNumberPatterns = [...document.querySelectorAll("#page-number-settings .page-number-pattern")];
+const pageNumberSize = document.getElementById("page-number-size");
+const pageNumberReadout = document.getElementById("page-number-size-readout");
+const pageNumberSample = document.getElementById("page-number-sample");
+const pageNumberEnabled = document.getElementById("page-number-enabled");
+const pageNumberMincho = document.getElementById("page-number-mincho");
+const pageNumberGothic = document.getElementById("page-number-gothic");
+const PAGE_NUMBER_DEFAULT = { enabled: false, color: "#000000", size: 8, font: "mincho", place: "center", pattern: "n/N" };
+
+function chosenPageNumberFont() {
+  return pageNumberGothic.classList.contains("is-on") ? "gothic" : "mincho";
+}
+
+function chosenPageNumberColor() {
+  const chosen = pageNumberColors.find((button) => button.classList.contains("is-on"));
+  return chosen ? chosen.dataset.color : PAGE_NUMBER_DEFAULT.color;
+}
+
+function chosenPageNumberPlace() {
+  const chosen = pageNumberPlaces.find((button) => button.classList.contains("is-on"));
+  return chosen ? chosen.dataset.place : PAGE_NUMBER_DEFAULT.place;
+}
+
+function chosenPageNumberPattern() {
+  const chosen = pageNumberPatterns.find((button) => button.classList.contains("is-on"));
+  return chosen ? chosen.dataset.pattern : PAGE_NUMBER_DEFAULT.pattern;
+}
+
+function paintPageNumberSample() {
+  const size = Number(pageNumberSize.value);
+  const color = chosenPageNumberColor();
+  const font = chosenPageNumberFont();
+  const place = chosenPageNumberPlace();
+  const pattern = chosenPageNumberPattern();
+  const enabled = pageNumberEnabled.classList.contains("is-on");
+  pageNumberReadout.textContent = `${size} pt`;
+  pageNumberSample.textContent = pattern === "n" ? "1" : "1 / 15";
+  pageNumberSample.style.color = color;
+  pageNumberSample.style.fontSize = `${size}pt`;
+  pageNumberSample.style.fontFamily = STAMP_FAMILIES[font];
+  pageNumberSample.style.textAlign = place === "left" ? "left" : place === "right" ? "right" : "center";
+  pageNumberEnabled.setAttribute("aria-pressed", enabled ? "true" : "false");
+  pageNumberMincho.classList.toggle("is-on", font === "mincho");
+  pageNumberGothic.classList.toggle("is-on", font === "gothic");
+  pageNumberMincho.setAttribute("aria-pressed", font === "mincho" ? "true" : "false");
+  pageNumberGothic.setAttribute("aria-pressed", font === "gothic" ? "true" : "false");
+  pageNumberColors.forEach((button) => {
+    const on = button.dataset.color === color;
+    button.classList.toggle("is-on", on);
+    button.setAttribute("aria-pressed", on ? "true" : "false");
+  });
+  pageNumberPlaces.forEach((button) => {
+    const on = button.dataset.place === place;
+    button.classList.toggle("is-on", on);
+    button.setAttribute("aria-pressed", on ? "true" : "false");
+  });
+  pageNumberPatterns.forEach((button) => {
+    const on = button.dataset.pattern === pattern;
+    button.classList.toggle("is-on", on);
+    button.setAttribute("aria-pressed", on ? "true" : "false");
+  });
+}
+
+function fillPageNumberDialog(style) {
+  const next = style || PAGE_NUMBER_DEFAULT;
+  const known = pageNumberColors.some((button) => button.dataset.color === next.color);
+  pageNumberColors.forEach((button) => {
+    button.classList.toggle("is-on", button.dataset.color === (known ? next.color : PAGE_NUMBER_DEFAULT.color));
+  });
+  pageNumberPlaces.forEach((button) => {
+    button.classList.toggle("is-on", button.dataset.place === (next.place || PAGE_NUMBER_DEFAULT.place));
+  });
+  pageNumberPatterns.forEach((button) => {
+    button.classList.toggle("is-on", button.dataset.pattern === (next.pattern || PAGE_NUMBER_DEFAULT.pattern));
+  });
+  pageNumberSize.value = String(next.size || PAGE_NUMBER_DEFAULT.size);
+  pageNumberEnabled.classList.toggle("is-on", Boolean(next.enabled));
+  pageNumberMincho.classList.toggle("is-on", next.font !== "gothic");
+  pageNumberGothic.classList.toggle("is-on", next.font === "gothic");
+  paintPageNumberSample();
+}
+
+async function savePageNumber() {
+  if (!api || !view) return;
+  const enabled = pageNumberEnabled.classList.contains("is-on");
+  const color = chosenPageNumberColor();
+  const size = Number(pageNumberSize.value);
+  const font = chosenPageNumberFont();
+  const place = chosenPageNumberPlace();
+  const pattern = chosenPageNumberPattern();
+  const current = view.pageNumbers || PAGE_NUMBER_DEFAULT;
+  if (current.enabled === enabled && current.color === color && current.size === size && current.font === font && current.place === place && current.pattern === pattern) return;
+  const result = await api.set_page_number_style(enabled, color, size, font, place, pattern);
+  if (result && result.ok === false && result.pageNumbers) fillPageNumberDialog(result.pageNumbers);
+  if (result && result.ok === false && result.message) showBanner(result.message);
+  applyView(result);
+}
+
+document.getElementById("page-number-close").addEventListener("click", () => {
+  pageNumberDialog.close();
+});
+pageNumberDialog.addEventListener("click", (event) => {
+  const box = pageNumberDialog.getBoundingClientRect();
+  const inside = event.clientX >= box.left && event.clientX <= box.right
+    && event.clientY >= box.top && event.clientY <= box.bottom;
+  if (!inside) pageNumberDialog.close();
+});
+pageNumberEnabled.addEventListener("click", () => {
+  pageNumberEnabled.classList.toggle("is-on");
+  paintPageNumberSample();
+  savePageNumber();
+});
+pageNumberColors.forEach((button) => {
+  button.addEventListener("click", () => {
+    pageNumberColors.forEach((item) => item.classList.toggle("is-on", item === button));
+    paintPageNumberSample();
+    savePageNumber();
+  });
+});
+pageNumberPlaces.forEach((button) => {
+  button.addEventListener("click", () => {
+    pageNumberPlaces.forEach((item) => item.classList.toggle("is-on", item === button));
+    paintPageNumberSample();
+    savePageNumber();
+  });
+});
+pageNumberPatterns.forEach((button) => {
+  button.addEventListener("click", () => {
+    pageNumberPatterns.forEach((item) => item.classList.toggle("is-on", item === button));
+    paintPageNumberSample();
+    savePageNumber();
+  });
+});
+pageNumberSize.addEventListener("input", paintPageNumberSample);
+pageNumberSize.addEventListener("change", () => { savePageNumber(); });
+pageNumberMincho.addEventListener("click", () => {
+  pageNumberGothic.classList.remove("is-on");
+  pageNumberMincho.classList.add("is-on");
+  paintPageNumberSample();
+  savePageNumber();
+});
+pageNumberGothic.addEventListener("click", () => {
+  pageNumberMincho.classList.remove("is-on");
+  pageNumberGothic.classList.add("is-on");
+  paintPageNumberSample();
+  savePageNumber();
 });

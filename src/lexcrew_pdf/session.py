@@ -141,7 +141,7 @@ class Session:
             "grayscale": self.layout.grayscale,
             "mergeBranches": self.layout.merge_branches,
             "firstNumber": self.layout.first_number,
-            "pageNumbers": self.layout.page_numbers,
+            "pageNumbers": _page_number_view(self.layout.page_numbers),
             "stamp": _stamp_view(self.layout.stamp),
             "enabledSeries": list(self.layout.enabled_series),
             "canAddSeries": len(self.layout.enabled_series) < 5,
@@ -317,11 +317,15 @@ class Session:
         return self.view()
 
     @_locked
-    def set_page_numbers(self, enabled: bool) -> dict:
-        chosen = enabled is True
-        if chosen == self.layout.page_numbers:
+    def set_page_number_style(self, enabled, color, size, font, place, pattern="n/N") -> dict:
+        from .stamp import StampStyle, page_number_style_from_request, require_stamp_font
+
+        style = page_number_style_from_request(enabled, color, size, font, place, pattern)
+        if style.enabled:
+            require_stamp_font(StampStyle(style.color, style.size, style.font))
+        if style == self.layout.page_numbers:
             return self.view()
-        self.layout = replace(self.layout, page_numbers=chosen)
+        self.layout = replace(self.layout, page_numbers=style)
         self._persist()
         return self.view()
 
@@ -759,6 +763,7 @@ class Session:
         """ファイルがあるカードだけ、表示のあとでページ数とサムネイルを数える。"""
         from .names import stamp_label
         from .pages import resolve_buckets
+        from .plan import page_label
         from .stamp import inspect_source_pages, render_piece_jpeg, render_stamped_page_jpeg, skew_lookup, trim_lookup
 
         with self._lock:
@@ -774,6 +779,7 @@ class Session:
             template = self.layout.label_template
             grayscale = self.layout.grayscale
             style = self.layout.stamp
+            numbers = self.layout.page_numbers
             masks = card.masks
             trims = card.trims
             skews = card.skews
@@ -787,6 +793,7 @@ class Session:
             paths, split=split, tilts=tilts,
         )
         buckets = resolve_buckets(list(natural), page_rows, counts)
+        page_counts = [len(list(buckets.get(index + 1) or [])) for index in range(len(counts))]
         slots = []
         cursor = 0
         first_thumb = ""
@@ -797,6 +804,7 @@ class Session:
             thumb = ""
             if output_refs:
                 stamp_dx, stamp_dy = offsets[index]
+                label = page_label(page_counts, index, 0) if numbers.enabled else None
                 jpeg = render_stamped_page_jpeg(
                     paths,
                     stamp_label(template, shown, branch_number(index, len(counts))),
@@ -812,6 +820,8 @@ class Session:
                     style=style,
                     trims=trim_map,
                     skews=skew_map,
+                    numbers=numbers,
+                    page_number=label,
                 )
                 thumb = base64.b64encode(jpeg).decode("ascii")
             elif source_refs:
@@ -839,7 +849,7 @@ class Session:
         }
 
     def preview(self, number: int, slot_index: int, page_index: int, zoom: float = 1.15, bare: bool = False) -> dict:
-        from .plan import jobs_from_layout, slot_job
+        from .plan import jobs_from_layout, page_label, slot_job
         from .stamp import render_stamped_page_jpeg, skew_lookup, trim_lookup
 
         with self._lock:
@@ -854,6 +864,10 @@ class Session:
         if job is None:
             raise ValueError("プレビューできるPDFがありません。")
         pages = tuple(job.pages) if job.pages is not None else None
+        counts = _output_page_counts(built.jobs, int(number))
+        label = None
+        if layout.page_numbers.enabled:
+            label = page_label(counts, int(slot_index), int(page_index))
         jpeg = render_stamped_page_jpeg(
             job.sources,
             job.stamp,
@@ -871,6 +885,8 @@ class Session:
             style=layout.stamp,
             trims=trim_lookup(job.trims),
             skews=skew_lookup(job.skews),
+            numbers=layout.page_numbers,
+            page_number=label,
         )
         return {
             "image": base64.b64encode(jpeg).decode("ascii"),
@@ -878,22 +894,40 @@ class Session:
             "label": job.stamp,
         }
 
-    def piece(self, number: int, source: int, page: int, part: int, zoom: float = 0.45, slot_index: int | None = None) -> dict:
+    def piece(
+        self,
+        number: int,
+        source: int,
+        page: int,
+        part: int,
+        zoom: float = 0.45,
+        slot_index: int | None = None,
+        output_index: int | None = None,
+    ) -> dict:
+        from .plan import jobs_from_layout, page_label
         from .stamp import render_piece_jpeg, skew_lookup, trim_lookup
 
         with self._lock:
             card = self._card(int(number))
             paths = self._paths(card)
+            layout = self.layout
+            folder = self.folder if self.folder is not None else Path(".")
             if slot_index is None:
                 tilt = _rotation_for_source(card, int(source))
             else:
                 slot_index = int(slot_index)
                 _check_slot(card, slot_index)
                 tilt = card.slots[slot_index].rotation
-            grayscale = self.layout.grayscale
+            grayscale = layout.grayscale
             masks = card.masks
             trims = trim_lookup(card.trims)
             skews = skew_lookup(card.skews)
+            numbers = layout.page_numbers
+        label = None
+        if output_index is not None and slot_index is not None and numbers.enabled:
+            built = jobs_from_layout(layout, folder)
+            counts = _output_page_counts(built.jobs, int(number))
+            label = page_label(counts, slot_index, int(output_index))
         jpeg = render_piece_jpeg(
             paths,
             int(source),
@@ -905,6 +939,8 @@ class Session:
             masks=masks,
             trims=trims,
             skews=skews,
+            numbers=numbers,
+            page_number=label,
         )
         return {"image": base64.b64encode(jpeg).decode("ascii")}
 
@@ -1111,6 +1147,12 @@ def _stamp_view(style) -> dict:
     from .stamp import stamp_view
 
     return stamp_view(style)
+
+
+def _page_number_view(style) -> dict:
+    from .stamp import page_number_view
+
+    return page_number_view(style)
 
 
 def _empty(number: int) -> Card:
@@ -1480,6 +1522,25 @@ def _image_boxes(paths, refs, tilt: int) -> dict:
         for document in opened.values():
             document.close()
     return boxes
+
+
+def _output_page_counts(jobs, number: int) -> list[int]:
+    """この号証の枝番ごとの出力ページ数。まとめた PDF でも枝番は分けたまま数える。"""
+    selected = [job for job in jobs if job.number == int(number)]
+    if not selected:
+        return []
+    if len(selected) == 1 and selected[0].parts:
+        parts = selected[0].parts
+        size = max(part.slot_index for part in parts) + 1
+        counts = [0] * size
+        for part in parts:
+            counts[part.slot_index] = len(part.pages or ())
+        return counts
+    size = max(job.slot_index for job in selected) + 1
+    counts = [0] * size
+    for job in selected:
+        counts[job.slot_index] = len(job.pages) if job.pages is not None else _job_page_count(job)
+    return counts
 
 
 def _job_page_count(job) -> int:

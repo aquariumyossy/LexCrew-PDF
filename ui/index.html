@@ -127,6 +127,49 @@
       gap: 8px;
       align-items: center;
     }
+    header button[data-tip]:not(.series-open) { position: relative; }
+    header button[data-tip]::after {
+      content: attr(data-tip);
+      position: absolute;
+      z-index: 6;
+      top: calc(100% + 6px);
+      left: 0;
+      display: block;
+      width: max-content;
+      max-width: 16rem;
+      padding: 6px 8px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      color: var(--text);
+      font-size: 12px;
+      font-weight: 400;
+      line-height: 1.45;
+      text-align: left;
+      white-space: normal;
+      box-shadow: 0 8px 24px rgba(26, 36, 56, 0.12);
+      pointer-events: none;
+      opacity: 0;
+      visibility: hidden;
+      transition: opacity 0.08s linear, visibility 0s linear 0.08s;
+    }
+    header button[data-tip]:hover::after,
+    header button[data-tip]:focus-visible::after {
+      opacity: 1;
+      visibility: visible;
+      transition: opacity 0.08s linear 0.35s, visibility 0s linear 0.35s;
+    }
+    .header-actions button[data-tip]::after {
+      left: auto;
+      right: 0;
+    }
+    header button.series-open[aria-expanded="true"]::after,
+    header button.series-open[aria-expanded="true"]:hover::after,
+    header button.series-open[aria-expanded="true"]:focus-visible::after {
+      opacity: 0;
+      visibility: hidden;
+      transition: none;
+    }
     #help {
       width: min(40rem, calc(100% - 32px));
       max-height: 80vh;
@@ -240,7 +283,8 @@
       align-items: flex-start;
       padding: 2px 16px 24px;
     }
-    #stamp-settings {
+    #stamp-settings,
+    #page-number-settings {
       width: min(28rem, calc(100% - 32px));
       margin: auto;
       padding: 16px 18px 18px;
@@ -251,15 +295,24 @@
       font: inherit;
       box-shadow: 0 8px 24px rgba(26, 36, 56, 0.12);
     }
-    #stamp-settings::backdrop { background: rgba(26, 36, 56, 0.35); }
-    #stamp-settings h2 { margin: 0 0 14px; font-size: 15px; }
+    #stamp-settings::backdrop,
+    #page-number-settings::backdrop { background: rgba(26, 36, 56, 0.35); }
+    #stamp-settings h2,
+    #page-number-settings h2 { margin: 0 0 14px; font-size: 15px; }
     .stamp-row {
       display: flex;
       align-items: center;
       gap: 10px;
       margin: 0 0 12px;
     }
-    #stamp-size { flex: 1; }
+    #stamp-size,
+    #page-number-size { flex: 1; }
+    #page-number-sample {
+      margin: 4px 0 0;
+      padding: 8px 10px;
+      line-height: 1.2;
+      background: #f3f5f8;
+    }
     .stamp-color {
       display: inline-flex;
       align-items: center;
@@ -432,7 +485,7 @@
     <h1>LexCrew-PDF</h1>
     <div class="series-field">
       <input id="series" class="series-input" aria-label="証拠番号の形" spellcheck="false" autocomplete="off" />
-      <button id="series-open" class="series-open" type="button" aria-label="番号の形の一覧" aria-expanded="false">▼</button>
+      <button id="series-open" class="series-open" type="button" aria-label="番号の形の一覧" aria-expanded="false" data-tip="番号の形の候補を開く">▼</button>
       <ul id="series-menu" class="series-menu" hidden>
         <li><button type="button" data-value="甲第N号証">甲第N号証</button></li>
         <li><button type="button" data-value="乙第N号証">乙第N号証</button></li>
@@ -448,15 +501,15 @@
       開始
       <input id="first-number" type="number" min="1" max="9999" step="1" value="1" inputmode="numeric" />
     </label>
-    <button id="merge-branches" class="btn" type="button" aria-pressed="false">枝番ごとに出力</button>
+    <button id="merge-branches" class="btn" type="button" aria-pressed="false" data-tip="オンにすると、枝番を別々のPDFにする。オフのときは1つのPDFにまとめる">枝番ごとに出力</button>
     <p id="output"></p>
     <div class="header-actions">
-      <button id="help-open" class="btn" type="button">使い方</button>
-      <button id="clear" class="btn danger" type="button">クリア</button>
-      <button id="stamp-open" class="btn" type="button">スタンプ</button>
-      <button id="page-numbers" class="btn" type="button" aria-pressed="false">ページ番号</button>
-      <button id="grayscale" class="btn" type="button" aria-pressed="false">白黒</button>
-      <button id="generate" class="btn primary" type="button">証拠PDFを生成</button>
+      <button id="help-open" class="btn" type="button" data-tip="操作の説明を開く">使い方</button>
+      <button id="clear" class="btn danger" type="button" data-tip="カードと設定を起動直後に戻す。生成済みのPDFは残す">クリア</button>
+      <button id="stamp-open" class="btn" type="button" data-tip="印の色、大きさ、フォントを変える">スタンプ</button>
+      <button id="page-numbers" class="btn" type="button" aria-pressed="false" data-tip="頁番号の設定を開く。点灯中は、2ページ以上のPDFに番号を付ける">頁番号</button>
+      <button id="grayscale" class="btn" type="button" aria-pressed="false" data-tip="オンにすると、ページを灰色にしてから印を押す">白黒</button>
+      <button id="generate" class="btn primary" type="button" data-tip="ダウンロードの LexCrew-PDF-Downloads に印付きPDFを書き、そのフォルダを開く">証拠PDFを生成</button>
     </div>
   </header>
   <p id="banner" hidden></p>
@@ -482,8 +535,8 @@
       <li>「証拠PDFを生成」で、ダウンロードフォルダの「LexCrew-PDF-Downloads」に印付き PDF を書きます。1件以上書けたときは、そのフォルダをエクスプローラーで開きます。ヘッダーに保存先が出ます。カードを変えるたびに、同じフォルダの layout.json を上書きします。原本はコピーしません。</li>
       <li>「スタンプ」で、印の色、大きさ、フォントを変えます。色は赤、青、緑、黒です。フォントは明朝とゴシックです。大きさは 8 から 24 ポイントです。初期値は赤、11 ポイント、明朝です。</li>
       <li>「白黒」を押すと、載せたページを灰色にしてから、設定した色の印を押します。</li>
-      <li>「ページ番号」を押すと、生成した各 PDF の下端中央に「1 / 15」のように出ます。初期状態では付きません。番号はその PDF の中で 1 から振り、枝番をまとめたファイルではそのファイルの全ページを通して振ります。</li>
-      <li>「クリア」はカード、開始番号、枝番のまとめ、ページ番号を起動直後に戻します。生成済みの証拠 PDF は残ります。</li>
+      <li>「頁番号」を押すと設定が開きます。付ける、色、大きさ、フォント、位置（左下、中央下、右下）、パターン（n/N、n）を選べます。初期状態では付きません。パターンの初期値は n/N です。付けたとき、2ページ以上の枝番なら下端に「1 / 15」または「1」のように出ます。サムネイルと編集画面にも同じ番号が出ます。1ページの枝番には付けません。番号は枝番ごとに 1 から振ります。枝番を1つの PDF にまとめても、の１との２は別々に数えます。</li>
+      <li>「クリア」はカード、開始番号、枝番のまとめ、頁番号を起動直後に戻します。生成済みの証拠 PDF は残ります。</li>
     </ol>
     <h2>ページ編集</h2>
     <ul class="notes">
@@ -533,6 +586,44 @@
       <button id="stamp-gothic" class="btn" type="button" aria-pressed="false">ゴシック</button>
     </div>
     <p id="stamp-sample">甲第１１号証の２</p>
+  </dialog>
+  <dialog id="page-number-settings" aria-labelledby="page-number-title">
+    <div class="help-bar">
+      <button id="page-number-close" class="btn" type="button">閉じる</button>
+    </div>
+    <h2 id="page-number-title">頁番号</h2>
+    <div class="stamp-row">
+      <button id="page-number-enabled" class="btn" type="button" aria-pressed="false">付ける</button>
+    </div>
+    <div class="stamp-row" role="group" aria-labelledby="page-number-color-label">
+      <span id="page-number-color-label">色</span>
+      <button class="btn stamp-color page-number-color" type="button" data-color="#ff0000" aria-pressed="false"><span class="stamp-swatch" style="background:#ff0000"></span>赤</button>
+      <button class="btn stamp-color page-number-color" type="button" data-color="#0000ff" aria-pressed="false"><span class="stamp-swatch" style="background:#0000ff"></span>青</button>
+      <button class="btn stamp-color page-number-color" type="button" data-color="#008000" aria-pressed="false"><span class="stamp-swatch" style="background:#008000"></span>緑</button>
+      <button class="btn stamp-color page-number-color is-on" type="button" data-color="#000000" aria-pressed="true"><span class="stamp-swatch" style="background:#000000"></span>黒</button>
+    </div>
+    <label class="stamp-row">
+      大きさ
+      <input id="page-number-size" type="range" min="8" max="24" step="1" value="8" aria-label="頁番号の大きさ">
+      <span id="page-number-size-readout">8 pt</span>
+    </label>
+    <div class="stamp-row" role="group" aria-labelledby="page-number-font-label">
+      <span id="page-number-font-label">フォント</span>
+      <button id="page-number-mincho" class="btn is-on" type="button" aria-pressed="true">明朝</button>
+      <button id="page-number-gothic" class="btn" type="button" aria-pressed="false">ゴシック</button>
+    </div>
+    <div class="stamp-row" role="group" aria-labelledby="page-number-place-label">
+      <span id="page-number-place-label">位置</span>
+      <button class="btn page-number-place" type="button" data-place="left" aria-pressed="false">左下</button>
+      <button class="btn page-number-place is-on" type="button" data-place="center" aria-pressed="true">中央下</button>
+      <button class="btn page-number-place" type="button" data-place="right" aria-pressed="false">右下</button>
+    </div>
+    <div class="stamp-row" role="group" aria-labelledby="page-number-pattern-label">
+      <span id="page-number-pattern-label">パターン</span>
+      <button class="btn page-number-pattern is-on" type="button" data-pattern="n/N" aria-pressed="true">n/N</button>
+      <button class="btn page-number-pattern" type="button" data-pattern="n" aria-pressed="false">n</button>
+    </div>
+    <p id="page-number-sample">1 / 15</p>
   </dialog>
   <script src="app.js"></script>
 </body>

@@ -14,7 +14,16 @@ from .names import (
     check_series,
     filename_prefix,
 )
-from .stamp import DEFAULT_STAMP, StampStyle, stamp_record, stamp_style_from_json
+from .stamp import (
+    DEFAULT_PAGE_NUMBERS,
+    DEFAULT_STAMP,
+    PageNumberStyle,
+    StampStyle,
+    page_number_record,
+    page_number_style_from_json,
+    stamp_record,
+    stamp_style_from_json,
+)
 
 LAYOUT_NAME = "layout.json"
 OUTPUT_DIR_NAME = "LexCrew-PDF-Downloads"
@@ -93,7 +102,7 @@ class Layout:
     stamp: StampStyle = DEFAULT_STAMP
     merge_branches: bool = True
     first_number: int = 1
-    page_numbers: bool = False
+    page_numbers: PageNumberStyle = DEFAULT_PAGE_NUMBERS
 
 
 def default_layout() -> Layout:
@@ -107,7 +116,7 @@ def default_layout() -> Layout:
         stamp=DEFAULT_STAMP,
         merge_branches=True,
         first_number=1,
-        page_numbers=False,
+        page_numbers=DEFAULT_PAGE_NUMBERS,
     )
 
 
@@ -242,8 +251,7 @@ def parse_layout(raw: dict) -> Layout:
     first_number = raw.get("firstNumber", 1)
     if isinstance(first_number, bool) or not isinstance(first_number, int) or not 1 <= first_number <= FIRST_NUMBER_MAX:
         raise ValueError("配置ファイルを読めません。")
-    if "pageNumbers" in raw and raw.get("pageNumbers") is not True and raw.get("pageNumbers") is not False:
-        raise ValueError("配置ファイルを読めません。")
+    page_numbers = page_number_style_from_json(raw["pageNumbers"]) if "pageNumbers" in raw else DEFAULT_PAGE_NUMBERS
     return Layout(
         series=series,
         enabled_series=enabled_series,
@@ -254,7 +262,7 @@ def parse_layout(raw: dict) -> Layout:
         stamp=stamp,
         merge_branches=merge_branches,
         first_number=first_number,
-        page_numbers=raw.get("pageNumbers") is True,
+        page_numbers=page_numbers,
     )
 
 
@@ -322,8 +330,9 @@ def layout_to_json(layout: Layout) -> dict:
         payload["mergeBranches"] = False
     if layout.first_number != 1:
         payload["firstNumber"] = layout.first_number
-    if layout.page_numbers:
-        payload["pageNumbers"] = True
+    record_numbers = page_number_record(layout.page_numbers)
+    if record_numbers is not None:
+        payload["pageNumbers"] = record_numbers
     record = stamp_record(layout.stamp)
     if record is not None:
         payload["stamp"] = record

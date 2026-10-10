@@ -6,7 +6,16 @@ from pathlib import Path
 
 from .layout import OUTPUT_DIR_NAME
 from .plan import OutputJob
-from .stamp import StampFontMissing, require_stamp_font, skew_lookup, stamp_sources_to_pdf, trim_lookup
+from .stamp import (
+    DEFAULT_PAGE_NUMBERS,
+    PageNumberStyle,
+    StampFontMissing,
+    StampStyle,
+    require_stamp_font,
+    skew_lookup,
+    stamp_sources_to_pdf,
+    trim_lookup,
+)
 
 
 def write_jobs(
@@ -17,13 +26,16 @@ def write_jobs(
     preserve: tuple[str, ...] | list[str] = (),
     grayscale: bool = False,
     style=None,
-    page_numbers: bool = False,
+    page_numbers: PageNumberStyle | None = None,
 ) -> dict:
     """ジョブを書き、last_written から外れた前回分だけを消す。
 
     選んだ印のフォントが無いときは、何も書かず何も消さない。
     """
     require_stamp_font(style)
+    numbers = page_numbers if isinstance(page_numbers, PageNumberStyle) else DEFAULT_PAGE_NUMBERS
+    if numbers.enabled:
+        require_stamp_font(StampStyle(numbers.color, numbers.size, numbers.font))
     dest = folder / OUTPUT_DIR_NAME
     written: list[dict] = []
     errors: list[dict] = []
@@ -46,7 +58,7 @@ def write_jobs(
                 skews=skew_lookup(job.skews),
                 style=style,
                 parts=job.parts or None,
-                page_numbers=page_numbers,
+                page_numbers=numbers,
             )
             dest.mkdir(parents=True, exist_ok=True)
             target = _checked_output_path(dest, job.filename)

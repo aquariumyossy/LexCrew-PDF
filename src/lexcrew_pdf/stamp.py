@@ -125,6 +125,36 @@ class StampStyle:
 
 DEFAULT_STAMP = StampStyle(STAMP_COLOR, STAMP_FONT_SIZE, "mincho")
 
+PAGE_NUMBER_SIZE = 8
+PAGE_NUMBER_MARGIN = 10
+PAGE_NUMBER_PLACES = ("left", "center", "right")
+PAGE_NUMBER_PATTERNS = ("n/N", "n")
+_PAGE_NUMBER_FONT = "kouPage"
+
+
+@dataclass(frozen=True)
+class PageNumberStyle:
+    """案件全体の頁番号。印とは別に、色、大きさ、フォント、下の位置、パターンを持つ。"""
+
+    enabled: bool = False
+    color: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    size: int = PAGE_NUMBER_SIZE
+    font: str = "mincho"
+    place: str = "center"
+    pattern: str = "n/N"
+
+    def __post_init__(self) -> None:
+        if self.enabled is not True and self.enabled is not False:
+            raise ValueError("頁番号を付けるかは、付けるか付けないかです。")
+        StampStyle(self.color, self.size, self.font)
+        if self.place not in PAGE_NUMBER_PLACES:
+            raise ValueError("位置は左下、中央下、右下です。")
+        if self.pattern not in PAGE_NUMBER_PATTERNS:
+            raise ValueError("パターンは n/N か n です。")
+
+
+DEFAULT_PAGE_NUMBERS = PageNumberStyle()
+
 _STAMP_FACE = {
     "mincho": StampFace(
         css_family='"Yu Mincho", "YuMincho", "游明朝", serif',
@@ -202,6 +232,84 @@ def stamp_view(style: StampStyle) -> dict:
     return {"color": color_hex(style.color), "size": style.size, "font": style.font}
 
 
+def page_number_style_from_json(raw) -> PageNumberStyle:
+    """配置の pageNumbers。true は付けるだけで、ほかは初期値。壊れていれば配置全体を拒む。"""
+    if raw is None or raw is False:
+        return DEFAULT_PAGE_NUMBERS
+    if raw is True:
+        return PageNumberStyle(enabled=True)
+    if not isinstance(raw, dict):
+        raise ValueError("配置ファイルを読めません。")
+    try:
+        enabled = raw["enabled"] if "enabled" in raw else False
+        if enabled is not True and enabled is not False:
+            raise ValueError("配置ファイルを読めません。")
+        color = _hex_color(raw["color"]) if "color" in raw else DEFAULT_PAGE_NUMBERS.color
+        size = _stamp_size(raw["size"]) if "size" in raw else DEFAULT_PAGE_NUMBERS.size
+        font = _stamp_font(raw["font"]) if "font" in raw else DEFAULT_PAGE_NUMBERS.font
+        place = _page_number_place(raw["place"]) if "place" in raw else DEFAULT_PAGE_NUMBERS.place
+        pattern = _page_number_pattern(raw["pattern"]) if "pattern" in raw else DEFAULT_PAGE_NUMBERS.pattern
+    except (TypeError, ValueError):
+        raise ValueError("配置ファイルを読めません。") from None
+    return PageNumberStyle(enabled, color, size, font, place, pattern)
+
+
+def page_number_style_from_request(enabled, color, size, font, place, pattern="n/N") -> PageNumberStyle:
+    return PageNumberStyle(
+        enabled is True,
+        _hex_color(color),
+        _stamp_size(size),
+        _stamp_font(font),
+        _page_number_place(place),
+        _page_number_pattern(pattern),
+    )
+
+
+def page_number_record(style: PageNumberStyle) -> dict | None:
+    if style == DEFAULT_PAGE_NUMBERS:
+        return None
+    return {
+        "enabled": style.enabled,
+        "color": color_hex(style.color),
+        "size": style.size,
+        "font": style.font,
+        "place": style.place,
+        "pattern": style.pattern,
+    }
+
+
+def page_number_view(style: PageNumberStyle) -> dict:
+    record = page_number_record(style)
+    if record is not None:
+        return record
+    return {
+        "enabled": False,
+        "color": color_hex(DEFAULT_PAGE_NUMBERS.color),
+        "size": DEFAULT_PAGE_NUMBERS.size,
+        "font": DEFAULT_PAGE_NUMBERS.font,
+        "place": DEFAULT_PAGE_NUMBERS.place,
+        "pattern": DEFAULT_PAGE_NUMBERS.pattern,
+    }
+
+
+def _page_number_place(value) -> str:
+    if value not in PAGE_NUMBER_PLACES:
+        raise ValueError("位置は左下、中央下、右下です。")
+    return value
+
+
+def _page_number_pattern(value) -> str:
+    if value not in PAGE_NUMBER_PATTERNS:
+        raise ValueError("パターンは n/N か n です。")
+    return value
+
+
+def _page_number_text(style: PageNumberStyle, index: int, total: int) -> str:
+    if style.pattern == "n":
+        return str(index)
+    return f"{index} / {total}"
+
+
 def _hex_color(value) -> tuple[float, float, float]:
     if not isinstance(value, str):
         raise ValueError("色は赤、青、緑、黒から選んでください。")
@@ -232,9 +340,6 @@ def _chosen_style(style: StampStyle | None) -> StampStyle:
 
 
 _IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png"}
-# 下端中央。本文の配置は変えず、文字幅だけの白い下地に載せる。
-PAGE_NUMBER_SIZE = 8
-PAGE_NUMBER_MARGIN = 10
 
 
 def open_source(path: str):
@@ -457,7 +562,7 @@ def stamp_sources_to_pdf(
     skews: dict[tuple[int, int], int] | None = None,
     style: StampStyle | None = None,
     parts=None,
-    page_numbers: bool = False,
+    page_numbers: PageNumberStyle | None = None,
 ) -> bytes:
     """原本を順にA4縦へ載せる。証拠番号は出力の1ページ目だけに押す。
 
@@ -471,16 +576,20 @@ def stamp_sources_to_pdf(
     trims は (原本, ページ, 部分) ごとの四辺。端はクリップで落とし、中身は拡大しない。
     skews は (原本, ページ) ごとの右回り十分の一度。分割した左右は同じ角度。印は回さない。
     style を省いたときは赤、11 ポイント、明朝。
-    page_numbers のときは、この出力のページを 1 から「1 / 15」のように振る。枝番をまとめたファイルも通して振る。
+    page_numbers を付けたときは、2ページ以上のまとまりを 1 から振る。パターン n/N は「1 / 15」、n は「1」。1ページには付けない。枝番を1つの PDF にまとめても、の１との２は別々に数える。
     """
     if not source_paths:
         raise ValueError("原本がありません。")
+    numbers = page_numbers if isinstance(page_numbers, PageNumberStyle) else DEFAULT_PAGE_NUMBERS
     chosen = _chosen_style(style)
     font_path = require_stamp_font(chosen)
+    if numbers.enabled:
+        require_stamp_font(StampStyle(numbers.color, numbers.size, numbers.font))
     box_w, box_h = _stamp_box(font_path, chosen)
     output = fitz.open()
     try:
         placed = 0
+        runs: list[int] = []
 
         def place_run(run_label: str, run_tilt: int, run_pages, run_dx: int, run_dy: int) -> None:
             nonlocal placed
@@ -503,6 +612,7 @@ def stamp_sources_to_pdf(
                 placed += 1
 
             _for_each_placement(source_paths, split, run_pages, place, run_tilt)
+            runs.append(placed - start)
 
         if parts:
             for run in parts:
@@ -511,8 +621,8 @@ def stamp_sources_to_pdf(
             place_run(label, tilt, pages, stamp_dx, stamp_dy)
         if placed <= 0:
             raise ValueError("ページがありません。")
-        if page_numbers:
-            _draw_page_numbers(output)
+        if numbers.enabled:
+            _draw_page_numbers(output, numbers, runs)
         _clear_output_metadata(output)
         return output.tobytes(garbage=4)
     finally:
@@ -536,6 +646,8 @@ def render_stamped_page_jpeg(
     trims: dict[tuple[int, int, int], PageTrim] | None = None,
     skews: dict[tuple[int, int], int] | None = None,
     style: StampStyle | None = None,
+    numbers: PageNumberStyle | None = None,
+    page_number: tuple[int, int] | None = None,
 ) -> bytes:
     """指定ページだけを印字してJPEGにする。甲号証フォルダへは書かない。"""
     if page_index < 0:
@@ -572,6 +684,7 @@ def render_stamped_page_jpeg(
             pass
         else:
             raise IndexError("ページがありません。")
+        _draw_preview_page_number(output[0], numbers, page_number)
         pixmap = output[0].get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
         return pixmap.tobytes("jpeg")
     finally:
@@ -590,6 +703,8 @@ def render_piece_jpeg(
     masks=(),
     trims: dict[tuple[int, int, int], PageTrim] | None = None,
     skews: dict[tuple[int, int], int] | None = None,
+    numbers: PageNumberStyle | None = None,
+    page_number: tuple[int, int] | None = None,
 ) -> bytes:
     """編集用に1枚だけ載せる。証拠番号は最終の位置で決まるので、ここには押さない。"""
     if source_index < 0 or source_index >= len(source_paths):
@@ -611,6 +726,7 @@ def render_piece_jpeg(
             page, source[page_index], source_index, page_index, clip, tilt, masks,
             limit=limit, skew_tenths=skew_tenths,
         )
+        _draw_preview_page_number(output[0], numbers, page_number)
         pixmap = output[0].get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
         return pixmap.tobytes("jpeg")
     finally:
@@ -1060,26 +1176,54 @@ def _trim_for(trims, source_index: int, page_index: int, part: int) -> PageTrim 
     return found
 
 
-def _draw_page_numbers(output) -> None:
-    """出力ファイルの下端中央へ、そのファイルのページ数で「1 / 15」と書く。"""
-    total = output.page_count
-    if total < 1:
+def _draw_page_numbers(output, style: PageNumberStyle, runs: list[int]) -> None:
+    """枝番ごとに「1 / 15」と書く。1ページの枝番には付けない。"""
+    if not any(count >= 2 for count in runs):
         return
-    font = fitz.Font("helv")
-    for index, page in enumerate(output, start=1):
-        label = f"{index} / {total}"
-        width = font.text_length(label, fontsize=PAGE_NUMBER_SIZE)
-        baseline = page.rect.y1 - PAGE_NUMBER_MARGIN
+    font_path = require_stamp_font(StampStyle(style.color, style.size, style.font))
+    font = fitz.Font(fontfile=font_path)
+    offset = 0
+    for total in runs:
+        if total >= 2:
+            for index in range(1, total + 1):
+                _paint_page_number(
+                    output[offset + index - 1], style, index, total, font_path=font_path, font=font,
+                )
+        offset += total
+
+
+def _draw_preview_page_number(page, style: PageNumberStyle | None, page_number) -> None:
+    """サムネイルと編集画面へ、生成PDFと同じ1件の頁番号を書く。"""
+    if style is None or not style.enabled or page_number is None:
+        return
+    index, total = int(page_number[0]), int(page_number[1])
+    if total < 2 or index < 1 or index > total:
+        return
+    font_path = require_stamp_font(StampStyle(style.color, style.size, style.font))
+    font = fitz.Font(fontfile=font_path)
+    _paint_page_number(page, style, index, total, font_path=font_path, font=font)
+
+
+def _paint_page_number(page, style: PageNumberStyle, index: int, total: int, *, font_path: str, font) -> None:
+    label = _page_number_text(style, index, total)
+    width = font.text_length(label, fontsize=style.size)
+    baseline = page.rect.y1 - PAGE_NUMBER_MARGIN
+    if style.place == "left":
+        x = page.rect.x0 + PAGE_NUMBER_MARGIN
+    elif style.place == "right":
+        x = page.rect.x1 - PAGE_NUMBER_MARGIN - width
+    else:
         x = page.rect.x0 + (page.rect.width - width) / 2
-        plate = fitz.Rect(x - 2, baseline - PAGE_NUMBER_SIZE - 1, x + width + 2, baseline + 2)
-        page.draw_rect(plate, color=None, fill=(1, 1, 1), width=0)
-        page.insert_text(
-            fitz.Point(x, baseline),
-            label,
-            fontname="helv",
-            fontsize=PAGE_NUMBER_SIZE,
-            color=(0, 0, 0),
-        )
+    plate = fitz.Rect(x - 2, baseline - style.size - 1, x + width + 2, baseline + 2)
+    page.draw_rect(plate, color=None, fill=(1, 1, 1), width=0)
+    page.insert_font(fontname=_PAGE_NUMBER_FONT, fontfile=font_path)
+    page.insert_text(
+        fitz.Point(x, baseline),
+        label,
+        fontname=_PAGE_NUMBER_FONT,
+        fontsize=style.size,
+        color=style.color,
+    )
 
 
 def _clear_output_metadata(document) -> None:

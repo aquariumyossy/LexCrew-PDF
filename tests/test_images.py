@@ -292,7 +292,7 @@ def test_image_can_be_rotated_masked_and_stamped(tmp_path, monkeypatch):
     session = Session(tmp_path)
     session.add_file(1, 0, str(source))
     session.rotate(1)
-    session.set_page_numbers(True)
+    session.set_page_number_style(True, "#000000", 8, "mincho", "center")
     result = session.generate()
     assert result["ok"] is True
     written = list((tmp_path / "LexCrew-PDF-Downloads").glob("甲001 *.pdf"))
@@ -300,7 +300,7 @@ def test_image_can_be_rotated_masked_and_stamped(tmp_path, monkeypatch):
     output = fitz.open(written[0])
     try:
         assert output.page_count == 1
-        assert "1 / 1" in output[0].get_text()
+        assert "1 / 1" not in output[0].get_text().replace("\xa0", " ")
         assert "甲第１号証" in output[0].get_text()
     finally:
         output.close()

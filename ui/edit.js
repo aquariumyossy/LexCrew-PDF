@@ -282,7 +282,7 @@ function drawNav() {
       if (!entry.isIntersecting) continue;
       const index = Number(entry.target.dataset.index);
       const image = entry.target.querySelector("img");
-      if (output[index]) loadThumb(image, output[index]);
+      if (output[index]) loadThumb(image, output[index], index);
     }
   }, { root: nav, rootMargin: "160px" });
   for (const item of nav.children) navObserver.observe(item);
@@ -419,25 +419,25 @@ function thumbZoom() {
   return Math.min(0.8, Math.max(0.2, (140 / 595) * (window.devicePixelRatio || 1)));
 }
 
-function thumbKey(piece) {
+function thumbKey(piece, index) {
   const zoom = thumbZoom();
   const covered = masks
     .filter((mask) => mask.source === piece.source && mask.page === piece.page && mask.part === piece.part)
     .map((mask) => `${mask.sx},${mask.sy},${mask.sw},${mask.sh}`)
     .join(";");
   const trim = savedTrim(piece);
-  return `${piece.source}:${piece.page}:${piece.part}:${rotation}:${split ? 1 : 0}:${zoom.toFixed(2)}:${covered}:${trim.top}:${trim.right}:${trim.bottom}:${trim.left}:${savedSkew(piece)}`;
+  return `${index}:${piece.source}:${piece.page}:${piece.part}:${rotation}:${split ? 1 : 0}:${zoom.toFixed(2)}:${covered}:${trim.top}:${trim.right}:${trim.bottom}:${trim.left}:${savedSkew(piece)}`;
 }
 
-function loadThumb(image, piece) {
+function loadThumb(image, piece, index) {
   const zoom = thumbZoom();
-  const key = thumbKey(piece);
+  const key = thumbKey(piece, index);
   if (thumbCache.has(key)) {
     image.src = thumbCache.get(key);
     return;
   }
-  enqueue(() => api.piece(number, piece.source, piece.page, piece.part, zoom, slot)).then((result) => {
-    if (!image.isConnected || key !== thumbKey(piece) || !result || result.ok === false || !result.image) return;
+  enqueue(() => api.piece(number, piece.source, piece.page, piece.part, zoom, slot, index)).then((result) => {
+    if (!image.isConnected || key !== thumbKey(piece, index) || !result || result.ok === false || !result.image) return;
     const src = `data:image/jpeg;base64,${result.image}`;
     thumbCache.set(key, src);
     image.src = src;
@@ -1058,7 +1058,7 @@ function reloadSkewed(source, page) {
     if (piece.source !== source || piece.page !== page) return;
     reloadSheet(index);
     const thumb = document.querySelector(`#nav .thumb[data-index="${index}"] img`);
-    if (thumb) loadThumb(thumb, piece);
+    if (thumb) loadThumb(thumb, piece, index);
   });
 }
 
@@ -1222,7 +1222,7 @@ async function commitTrim(piece, next) {
     if (index >= 0) {
       reloadSheet(index);
       const thumb = document.querySelector(`#nav .thumb[data-index="${index}"] img`);
-      if (thumb) loadThumb(thumb, piece);
+      if (thumb) loadThumb(thumb, piece, index);
     }
   } catch (error) {
     trimLive = null;
@@ -1394,7 +1394,7 @@ function applyMaskResult(result) {
   document.querySelectorAll("#nav .thumb").forEach((item) => {
     const piece = output[Number(item.dataset.index)];
     const image = item.querySelector("img");
-    if (piece && image) loadThumb(image, piece);
+    if (piece && image) loadThumb(image, piece, Number(item.dataset.index));
   });
   if (covered !== maskCoversStamp()) {
     previewEpoch += 1;

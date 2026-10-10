@@ -21,6 +21,40 @@
       padding: 8px 12px;
       background: #fff;
       border-bottom: 1px solid #d5deef;
+      z-index: 2; /* ヘッダーの外にはみ出す吹き出しを、下のページより前に出す */
+    }
+    header button[data-tip] { position: relative; }
+    header button[data-tip]::after {
+      content: attr(data-tip);
+      position: absolute;
+      z-index: 6;
+      top: calc(100% + 6px);
+      left: auto;
+      right: 0;
+      display: block;
+      width: max-content;
+      max-width: 16rem;
+      padding: 6px 8px;
+      border: 1px solid #d5deef;
+      border-radius: 8px;
+      background: #fff;
+      color: #1a2438;
+      font-size: 12px;
+      font-weight: 400;
+      line-height: 1.45;
+      text-align: left;
+      white-space: normal;
+      box-shadow: 0 8px 24px rgba(26, 36, 56, 0.12);
+      pointer-events: none;
+      opacity: 0;
+      visibility: hidden;
+      transition: opacity 0.08s linear, visibility 0s linear 0.08s;
+    }
+    header button[data-tip]:hover::after,
+    header button[data-tip]:focus-visible::after {
+      opacity: 1;
+      visibility: visible;
+      transition: opacity 0.08s linear 0.35s, visibility 0s linear 0.35s;
     }
     h1 { margin: 0; font-size: 15px; }
     .tools, .zoom { display: flex; align-items: center; gap: 6px; }
@@ -268,19 +302,19 @@
   <header>
     <h1 id="heading">ページ編集</h1>
     <div class="tools">
-      <button id="mask" class="btn" type="button" aria-pressed="false">マスキング</button>
+      <button id="mask" class="btn" type="button" aria-pressed="false" data-tip="オンにしてページをドラッグすると、その範囲を黒く覆う">マスキング</button>
       <div class="skew" role="group" aria-label="傾き">
-        <button id="skew-left" class="btn" type="button" aria-label="左へ0.1度">◁</button>
+        <button id="skew-left" class="btn" type="button" aria-label="左へ0.1度" data-tip="見ているページを左へ0.1度傾ける。押し続けると、離すまで回る">◁</button>
         <span id="skew-readout">傾き0.0°</span>
-        <button id="skew-right" class="btn" type="button" aria-label="右へ0.1度">▷</button>
+        <button id="skew-right" class="btn" type="button" aria-label="右へ0.1度" data-tip="見ているページを右へ0.1度傾ける。押し続けると、離すまで回る">▷</button>
       </div>
       <div class="zoom">
-        <button id="zoom-out" class="btn" type="button" aria-label="縮小">−</button>
-        <button id="zoom-label" class="btn" type="button" aria-label="幅に合わせる">100%</button>
-        <button id="zoom-in" class="btn" type="button" aria-label="拡大">＋</button>
+        <button id="zoom-out" class="btn" type="button" aria-label="縮小" data-tip="縮小する">−</button>
+        <button id="zoom-label" class="btn" type="button" aria-label="幅に合わせる" data-tip="幅に合わせた100%に戻す">100%</button>
+        <button id="zoom-in" class="btn" type="button" aria-label="拡大" data-tip="拡大する">＋</button>
       </div>
-      <button id="trim-clear" class="btn" type="button">トリムクリア</button>
-      <button id="reset" class="btn" type="button">元に戻す</button>
+      <button id="trim-clear" class="btn" type="button" data-tip="見ているページの端の削りを戻す">トリムクリア</button>
+      <button id="reset" class="btn" type="button" data-tip="この枝番のページ順を原本に戻す。削りと傾きは残る">元に戻す</button>
     </div>
   </header>
   <main>

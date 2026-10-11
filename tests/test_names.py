@@ -3,6 +3,8 @@ import pytest
 
 from lexcrew_pdf.names import (
     MAX_FILENAME_CHARS,
+    canonical_template,
+    display_label,
     document_title,
     exhibit_number,
     filename_prefix,
@@ -12,6 +14,7 @@ from lexcrew_pdf.names import (
     sanitize_filename_title,
     stamp_label,
     strip_leading_exhibit_number,
+    title_only_filename,
 )
 
 
@@ -114,9 +117,42 @@ def test_branch_range_uses_a_tilde_between_the_first_and_last():
         output_filename("甲", 1, 3, "書", branch_end=1)
 
 
-def test_template_without_n_is_rejected():
-    with pytest.raises(ValueError):
-        stamp_label("資料", 1, None)
+def test_template_without_n_is_the_same_text_on_every_card():
+    assert canonical_template("別紙") == "別紙"
+    assert canonical_template("参考資料") == "参考資料"
+    assert canonical_template("別紙Ｎ") == "別紙N"
+    assert canonical_template("甲") == "甲第N号証"
+    assert stamp_label("別紙", 3, 2) == "別紙"
+    assert stamp_label("参考資料", 1, None) == "参考資料"
+    assert display_label("別紙", 4, 1, 3) == "別紙"
+    assert display_label("参考資料", 2, 0, 1) == "参考資料"
+    assert filename_prefix("別紙") == "別紙"
+    assert title_only_filename("書名") == "書名.pdf"
+    assert title_only_filename("") == "証拠.pdf"
+    with pytest.raises(ValueError, match="この形には番号がありません。"):
+        output_filename("別紙", 1, None, "書")
+    with pytest.raises(ValueError, match="番号の形を入力してください。"):
+        canonical_template("  ")
+    with pytest.raises(ValueError, match="N のほかに"):
+        canonical_template("N")
+    with pytest.raises(ValueError, match="ファイル名に使えない文字"):
+        canonical_template("別紙:資料")
+
+
+def test_title_only_filenames_suffix_duplicates_and_stay_within_100_characters():
+    taken: set[str] = set()
+    assert title_only_filename("書名", taken) == "書名.pdf"
+    assert title_only_filename("書名", taken) == "書名 (2).pdf"
+    assert title_only_filename("書:名", taken) == "書名 (3).pdf"
+    assert title_only_filename("書名 (2)", taken) == "書名 (2) (2).pdf"
+    plain = title_only_filename("あ" * 200)
+    assert len(plain) == MAX_FILENAME_CHARS
+    assert plain.endswith(".pdf")
+    assert not plain[:-4].endswith(" ")
+    second = title_only_filename("あ" * 200, {plain})
+    assert len(second) <= MAX_FILENAME_CHARS
+    assert second.endswith(" (2).pdf")
+    assert second != plain
 
 
 def test_shown_number_counts_from_the_first_number():
@@ -134,10 +170,9 @@ def test_shown_number_counts_from_the_first_number():
         require_first_number(True)
 
 
-def test_unknown_series_is_rejected():
-    with pytest.raises(ValueError):
-        stamp_label("A", 1, None)
-    with pytest.raises(ValueError):
+def test_unknown_series_without_n_is_a_fixed_label():
+    assert stamp_label("A", 1, None) == "A"
+    with pytest.raises(ValueError, match="この形には番号がありません。"):
         output_filename("A", 1, None, "書名")
 
 

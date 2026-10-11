@@ -591,6 +591,7 @@ function stampButton() {
   button.addEventListener("pointerup", onStampPointerUp);
   button.addEventListener("pointercancel", onStampPointerUp);
   button.addEventListener("dblclick", onStampDoubleClick);
+  button.title = "ドラッグで移動。ダブルクリックで右上に戻す";
   button.addEventListener("keydown", onStampKeyDown);
   button.addEventListener("keyup", onStampKeyUp);
   return button;

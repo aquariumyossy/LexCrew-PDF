@@ -1,4 +1,7 @@
-"""ファイル名と印の文字。種類は甲乙丙丁戊。疎甲や乙Aは、その見出しをファイル名の頭に使う。"""
+"""ファイル名と印の文字。種類は甲乙丙丁戊。疎甲や乙Aは、その見出しをファイル名の頭に使う。
+
+N の無い形（別紙、参考資料）は、その文字をすべての印にする。ファイル名には番号を出さない。
+"""
 from __future__ import annotations
 
 import re
@@ -58,18 +61,35 @@ def check_series(series: str) -> str:
 
 
 def canonical_template(value: str) -> str:
-    """「資料N」の N が証拠番号。甲・乙だけを渡したときは「甲第N号証」にする。"""
+    """「資料N」の N が証拠番号。甲・乙だけを渡したときは「甲第N号証」にする。
+
+    N が無いときは、その文字をすべてのカードの印にする。例: 別紙、参考資料。
+    """
     text = (value or "").strip().replace("Ｎ", "N")
     if text in SERIES:
         text = f"{text}第N号証"
-    if "N" not in text:
-        raise ValueError("証拠番号の位置に N を入れてください。例: 資料N")
     if len(text) > 40:
         raise ValueError("番号の形が長すぎます。")
+    if "N" not in text:
+        if not text:
+            raise ValueError("番号の形を入力してください。")
+        if any(ord(ch) < 32 or ch in _ILLEGAL_FILENAME for ch in text):
+            raise ValueError("番号の形に、ファイル名に使えない文字があります。")
+        return text
     body = text.replace("N", "")
     if not body or body[0] in _ILLEGAL_FILENAME or body[0] in " ." or ord(body[0]) < 32:
         raise ValueError("N のほかに、ファイル名に使える文字を1文字以上入れてください。")
     return text
+
+
+def template_has_number(value: str) -> bool:
+    """N がある形だけ、カードごとに番号が変わる。"""
+    return "N" in canonical_template(value)
+
+
+def exhibit_filenames_use_numbers(template: str, *, stamp_enabled: bool) -> bool:
+    """印を付け、かつ形に N があるときだけ、ファイル名の頭に番号を出す。"""
+    return bool(stamp_enabled) and template_has_number(template)
 
 
 def filename_prefix(template: str) -> str:
@@ -90,9 +110,12 @@ def filename_prefix(template: str) -> str:
 
 
 def apply_number(template: str, number: int) -> str:
+    text = canonical_template(template)
+    if "N" not in text:
+        return text
     if number < 1:
         raise ValueError("証拠番号が不正です。")
-    return canonical_template(template).replace("N", fullwidth_digits(number))
+    return text.replace("N", fullwidth_digits(number))
 
 
 def branch_number(slot_index: int, slot_count: int) -> int | None:
@@ -103,7 +126,12 @@ def branch_number(slot_index: int, slot_count: int) -> int | None:
 
 
 def display_label(series: str, number: int, slot_index: int, slot_count: int) -> str:
-    """カードに出す号証名。枝番スロットが複数のときだけ「の１」を付ける。"""
+    """カードに出す号証名。枝番スロットが複数のときだけ「の１」を付ける。
+
+    N が無い形は、枝番があっても同じ文字のまま。
+    """
+    if not template_has_number(series):
+        return canonical_template(series)
     base = apply_number(series, number)
     if slot_count <= 1:
         return base
@@ -111,7 +139,12 @@ def display_label(series: str, number: int, slot_index: int, slot_count: int) ->
 
 
 def stamp_label(series: str, number: int, branch: int | None) -> str:
-    """印は全角数字。枝番が無いときは「甲第１号証」。"""
+    """印は全角数字。枝番が無いときは「甲第１号証」。
+
+    N が無い形は、番号も枝番も付けず、その文字だけ。
+    """
+    if not template_has_number(series):
+        return canonical_template(series)
     label = apply_number(series, number)
     if branch:
         if branch < 1:
@@ -122,6 +155,7 @@ def stamp_label(series: str, number: int, branch: int | None) -> str:
 
 def exhibit_number(series: str, number: int, branch: int | None) -> str:
     """ファイル名の号証番号。甲001、甲001-1、乙A001。印の文言や範囲は含めない。"""
+    _require_numbered_template(series)
     if number < 1:
         raise ValueError("証拠番号が不正です。")
     return filename_prefix(series) + _number_token(number, branch, None)
@@ -169,6 +203,7 @@ def filename_stem_token(
     branch_end: int | None = None,
 ) -> str:
     """甲001-1~3。書名と拡張子は付けない。カードの「含めて出力」に使う。"""
+    _require_numbered_template(series)
     if number < 1:
         raise ValueError("証拠番号が不正です。")
     return filename_prefix(series) + _number_token(number, branch, branch_end)
@@ -187,6 +222,7 @@ def output_filename(
     番号と書名のあいだは半角スペース。
     `.pdf` を含めて 100 文字に収まるよう、書名の後ろを切る。
     """
+    _require_numbered_template(series)
     if number < 1:
         raise ValueError("証拠番号が不正です。")
     prefix = filename_prefix(series)
@@ -205,6 +241,64 @@ def sanitize_filename_title(title: str) -> str:
             continue
         kept.append(ch)
     return "".join(kept).strip(" .")
+
+
+def title_only_filename(title: str, taken: set[str] | None = None) -> str:
+    """書名だけのファイル名。taken にあれば「書名 (2).pdf」。渡した集合へ足す。
+
+    印を出さないときと、N の無い形のときに使う。空の書名は「証拠.pdf」。
+    """
+    suffix = ".pdf"
+    stem = _fit_filename_title(title, MAX_FILENAME_CHARS - len(suffix))
+    candidate = f"{stem}{suffix}"
+    if taken is None or candidate not in taken:
+        if taken is not None:
+            taken.add(candidate)
+        return candidate
+    number = 2
+    while number <= 9999:
+        mark = f" ({number})"
+        budget = MAX_FILENAME_CHARS - len(suffix) - len(mark)
+        trimmed = _fit_filename_title(title, budget)
+        candidate = f"{trimmed}{mark}{suffix}"
+        if candidate not in taken and len(candidate) <= MAX_FILENAME_CHARS:
+            taken.add(candidate)
+            return candidate
+        number += 1
+    raise ValueError("同じ書名が多すぎます。")
+
+
+class FilenameBook:
+    """1回の表示、または1回の生成で、ファイル名をカードの順に決める。"""
+
+    def __init__(self, template: str, stamp_enabled: bool = True) -> None:
+        self.template = canonical_template(template)
+        self.numbered = exhibit_filenames_use_numbers(self.template, stamp_enabled=stamp_enabled)
+        self.taken: set[str] = set()
+
+    def claim(
+        self,
+        shown: int,
+        branch: int | None,
+        title: str,
+        branch_end: int | None = None,
+    ) -> str:
+        if self.numbered:
+            return output_filename(self.template, shown, branch, title, branch_end=branch_end)
+        return title_only_filename(title, self.taken)
+
+    def token(self, shown: int, branch: int | None, branch_end: int | None, filename: str) -> str:
+        """「含めて出力」の印。番号があるときは甲001-1~3。無いときはファイル名そのもの。"""
+        if self.numbered:
+            return filename_stem_token(self.template, shown, branch, branch_end)
+        return filename
+
+
+def _require_numbered_template(series: str) -> str:
+    text = canonical_template(series)
+    if "N" not in text:
+        raise ValueError("この形には番号がありません。")
+    return text
 
 
 def _number_token(number: int, branch: int | None, branch_end: int | None) -> str:

@@ -185,7 +185,7 @@ def test_excluded_middle_pages_are_not_merged_and_do_not_renumber(tmp_path, monk
     assert view["mergedFilename"] == "甲001-1~3 一.pdf"
     assert view["mergeWarning"] == ""
 
-    def fake_write(folder, jobs, *, last_written, preserve=(), grayscale=False, style=None, page_numbers=False):
+    def fake_write(folder, jobs, *, last_written, preserve=(), grayscale=False, style=None, page_numbers=False, stamp_enabled=True):
         return {
             "written": [{"filename": job.filename} for job in jobs],
             "errors": [],
@@ -511,3 +511,124 @@ def test_media_keeps_the_ordinal_and_stamps_the_shown_number(tmp_path, monkeypat
     media = session.media(1)
     assert media["number"] == 1
     assert seen["stamp"] == "甲第７号証"
+
+
+def test_stamp_off_uses_the_title_and_leaves_numbered_stamps_for_later(tmp_path, monkeypatch):
+    first = tmp_path / "契約.pdf"
+    second = tmp_path / "同じ.pdf"
+    third = tmp_path / "領収.pdf"
+    _pdf(first, "ONE")
+    _pdf(second, "TWO")
+    _pdf(third, "THREE")
+    session = Session(tmp_path)
+    assert session.layout.stamp_enabled is True
+    assert "stampEnabled" not in layout_to_json(session.layout)
+    session.add_file(1, 0, str(first))
+    session.set_title(1, "契約書", 0)
+    session.add_file(2, 0, str(second))
+    session.set_title(2, "契約書", 0)
+    session.add_branch(2)
+    session.add_file(2, 1, str(third))
+    session.set_title(2, "領収", 1)
+    session.set_stamp_enabled(False)
+    raw = json.loads((tmp_path / "LexCrew-PDF-Downloads" / "layout.json").read_text(encoding="utf-8"))
+    assert raw["stampEnabled"] is False
+    assert load_layout(tmp_path).stamp_enabled is False
+    built = jobs_from_layout(session.layout, tmp_path)
+    assert [job.filename for job in built.jobs] == ["契約書.pdf", "契約書 (2).pdf"]
+    assert built.jobs[0].stamp == "甲第１号証"
+    assert [part.stamp for part in built.jobs[1].parts] == ["甲第２号証の１", "甲第２号証の２"]
+    view = session.view()
+    assert view["stampEnabled"] is False
+    assert view["cards"][0]["label"] == "甲第１号証"
+    assert view["cards"][0]["slots"][0]["filename"] == "契約書.pdf"
+    assert view["cards"][1]["slots"][0]["filename"] == "契約書 (2).pdf"
+    assert view["cards"][1]["slots"][1]["filename"] == "契約書 (2).pdf"
+    assert view["cards"][1]["slots"][1]["outputNote"] == "→ 契約書 (2).pdf に含めて出力"
+    assert view["cards"][1]["slots"][0]["label"] == "甲第２号証の１"
+    seen = {}
+
+    def fake_render(paths, stamp, *args, **kwargs):
+        seen["draw"] = kwargs.get("draw_stamp")
+        return b"jpeg"
+
+    monkeypatch.setattr("lexcrew_pdf.stamp.render_stamped_page_jpeg", fake_render)
+    session.media(1)
+    assert seen["draw"] is False
+    session.begin_edit(1, 0)
+    assert session.edit_context()["stampFrame"] is None
+    assert session.edit_context()["label"] == "甲第１号証"
+    session.set_stamp_enabled(True)
+    restored = jobs_from_layout(session.layout, tmp_path)
+    assert restored.jobs[0].filename == "甲001 契約書.pdf"
+    assert "stampEnabled" not in layout_to_json(session.layout)
+
+
+def test_template_without_n_stamps_the_same_text_and_drops_the_number(tmp_path):
+    body = tmp_path / "本体.pdf"
+    branch = tmp_path / "枝.pdf"
+    other = tmp_path / "もう一つ.pdf"
+    _pdf(body, "BODY")
+    _pdf(branch, "BRANCH")
+    _pdf(other, "OTHER")
+    session = Session(tmp_path)
+    session.set_series("別紙")
+    assert session.layout.label_template == "別紙"
+    assert [card["label"] for card in session.view()["cards"][:3]] == ["別紙", "別紙", "別紙"]
+    session.add_file(1, 0, str(body))
+    session.add_branch(1)
+    session.add_file(1, 1, str(branch))
+    session.set_title(1, "契約", 0)
+    session.set_title(1, "領収", 1)
+    session.add_file(2, 0, str(other))
+    session.set_title(2, "契約", 0)
+    built = jobs_from_layout(session.layout, tmp_path)
+    assert [job.filename for job in built.jobs] == ["契約.pdf", "契約 (2).pdf"]
+    assert built.jobs[0].stamp == "別紙"
+    assert [part.stamp for part in built.jobs[0].parts] == ["別紙", "別紙"]
+    assert built.jobs[0].exhibit == ""
+    assert all(part.exhibit == "" for part in built.jobs[0].parts)
+    view = session.view()["cards"]
+    assert [slot["label"] for slot in view[0]["slots"]] == ["別紙", "別紙"]
+    assert view[0]["slots"][1]["outputNote"] == "→ 契約.pdf に含めて出力"
+    assert view[1]["slots"][0]["filename"] == "契約 (2).pdf"
+    session.set_series("参考資料")
+    named = jobs_from_layout(session.layout, tmp_path)
+    assert named.jobs[0].stamp == "参考資料"
+    assert named.jobs[0].filename == "契約.pdf"
+    session.set_merge_branches(False)
+    session.set_series("別紙")
+    separate = jobs_from_layout(session.layout, tmp_path)
+    assert [job.filename for job in separate.jobs[:2]] == ["契約.pdf", "領収.pdf"]
+    assert [job.stamp for job in separate.jobs[:2]] == ["別紙", "別紙"]
+
+
+def test_template_without_n_mentions_the_branch_slot_when_a_gap_blocks_merge(tmp_path):
+    first = tmp_path / "一.pdf"
+    third = tmp_path / "三.pdf"
+    _pdf(first)
+    _pdf(third)
+    session = Session(tmp_path)
+    session.set_series("別紙")
+    session.add_file(1, 0, str(first))
+    session.add_branch(1)
+    session.add_branch(1)
+    session.add_file(1, 2, str(third))
+    built = jobs_from_layout(session.layout, tmp_path)
+    assert [job.filename for job in built.jobs] == ["一.pdf", "三.pdf"]
+    assert [job.stamp for job in built.jobs] == ["別紙", "別紙"]
+    assert built.warnings[0]["message"] == (
+        "2番目の枝番にPDFが無いため、まとめて出力しません。空の枝番を削除すると、残った枝番がまとまります。"
+    )
+    assert session.view()["cards"][0]["mergeWarning"] == built.warnings[0]["message"]
+
+
+def test_old_layout_without_stamp_enabled_keeps_the_stamp_on():
+    raw = layout_to_json(default_layout())
+    assert "stampEnabled" not in raw
+    assert parse_layout(raw).stamp_enabled is True
+    off = parse_layout({**raw, "stampEnabled": False})
+    assert off.stamp_enabled is False
+    assert layout_to_json(off)["stampEnabled"] is False
+    with pytest.raises(ValueError, match="配置ファイルを読めません。"):
+        parse_layout({**raw, "stampEnabled": "no"})

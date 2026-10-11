@@ -563,6 +563,7 @@ def stamp_sources_to_pdf(
     style: StampStyle | None = None,
     parts=None,
     page_numbers: PageNumberStyle | None = None,
+    draw_stamp: bool = True,
 ) -> bytes:
     """原本を順にA4縦へ載せる。証拠番号は出力の1ページ目だけに押す。
 
@@ -577,15 +578,23 @@ def stamp_sources_to_pdf(
     skews は (原本, ページ) ごとの右回り十分の一度。分割した左右は同じ角度。印は回さない。
     style を省いたときは赤、11 ポイント、明朝。
     page_numbers を付けたときは、2ページ以上のまとまりを 1 から振る。パターン n/N は「1 / 15」、n は「1」。1ページには付けない。枝番を1つの PDF にまとめても、の１との２は別々に数える。
+    draw_stamp が偽のときは印を描かない。マスキング、端の削り、傾き、白黒、頁番号はそのまま行う。
     """
     if not source_paths:
         raise ValueError("原本がありません。")
     numbers = page_numbers if isinstance(page_numbers, PageNumberStyle) else DEFAULT_PAGE_NUMBERS
     chosen = _chosen_style(style)
-    font_path = require_stamp_font(chosen)
+    font_path = ""
+    box_w = 0.0
+    box_h = 0.0
+    if draw_stamp:
+        font_path = require_stamp_font(chosen)
+        labels = [label]
+        if parts:
+            labels.extend(run.stamp for run in parts)
+        box_w, box_h = _stamp_box(font_path, chosen, _widest_label(font_path, chosen, labels))
     if numbers.enabled:
         require_stamp_font(StampStyle(numbers.color, numbers.size, numbers.font))
-    box_w, box_h = _stamp_box(font_path, chosen)
     output = fitz.open()
     try:
         placed = 0
@@ -607,7 +616,7 @@ def stamp_sources_to_pdf(
                     page, source[index], source_index, index, clip, run_tilt, masks,
                     limit=limit, skew_tenths=skew_tenths,
                 )
-                if placed == start:
+                if placed == start and draw_stamp:
                     _draw_stamp(page, run_label, font_path, box_w, box_h, run_dx, run_dy, chosen)
                 placed += 1
 
@@ -653,8 +662,12 @@ def render_stamped_page_jpeg(
     if page_index < 0:
         raise IndexError("ページがありません。")
     chosen = _chosen_style(style)
-    font_path = require_stamp_font(chosen)
-    box_w, box_h = _stamp_box(font_path, chosen)
+    font_path = ""
+    box_w = 0.0
+    box_h = 0.0
+    if draw_stamp:
+        font_path = require_stamp_font(chosen)
+        box_w, box_h = _stamp_box(font_path, chosen, label)
     output = fitz.open()
     try:
         seen = 0
@@ -1275,11 +1288,29 @@ def a4_points() -> tuple[float, float]:
     return float(page.width), float(page.height)
 
 
-def _stamp_box(font_path: str, style: StampStyle | None = None) -> tuple[float, float]:
+def _widest_label(font_path: str, style: StampStyle, labels) -> str | None:
+    """見本より長い印だけ、枠を広げる材料として返す。短い印は見本のまま。"""
+    font = fitz.Font(fontfile=font_path)
+    best = None
+    best_width = font.text_length(STAMP_SAMPLE, fontsize=style.size)
+    for text in labels:
+        if not text:
+            continue
+        width = font.text_length(text, fontsize=style.size)
+        if width > best_width:
+            best = text
+            best_width = width
+    return best
+
+
+def _stamp_box(font_path: str, style: StampStyle | None = None, text: str | None = None) -> tuple[float, float]:
     chosen = _chosen_style(style)
     scale = chosen.size / STAMP_FONT_SIZE
     font = fitz.Font(fontfile=font_path)
-    width = font.text_length(STAMP_SAMPLE, fontsize=chosen.size)
+    sample = STAMP_SAMPLE
+    if text and font.text_length(text, fontsize=chosen.size) > font.text_length(sample, fontsize=chosen.size):
+        sample = text
+    width = font.text_length(sample, fontsize=chosen.size)
     return width + STAMP_PAD_X * scale * 2, STAMP_BOX_HEIGHT * scale
 
 
@@ -1307,14 +1338,14 @@ def clamp_stamp_offset(dx: int, dy: int, *, box_w: float, box_h: float) -> tuple
     )
 
 
-def stamp_frame(dx: int = 0, dy: int = 0, style: StampStyle | None = None) -> dict | None:
+def stamp_frame(dx: int = 0, dy: int = 0, style: StampStyle | None = None, label: str | None = None) -> dict | None:
     """編集画面がつまみを置くための枠。選んだフォントが無いときは None。"""
     chosen = _chosen_style(style)
     try:
         font_path = require_stamp_font(chosen)
     except StampFontMissing:
         return None
-    box_w, box_h = _stamp_box(font_path, chosen)
+    box_w, box_h = _stamp_box(font_path, chosen, label)
     page = _a4()
     clamped_dx, clamped_dy, origin_x, origin_y, x, y = clamp_stamp_offset(
         dx,

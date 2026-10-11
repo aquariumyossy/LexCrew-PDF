@@ -27,12 +27,15 @@ def write_jobs(
     grayscale: bool = False,
     style=None,
     page_numbers: PageNumberStyle | None = None,
+    stamp_enabled: bool = True,
 ) -> dict:
     """ジョブを書き、last_written から外れた前回分だけを消す。
 
     選んだ印のフォントが無いときは、何も書かず何も消さない。
+    印を出さないときは、印のフォントが無くても書く。頁番号を付けるときだけ、そのフォントを要る。
     """
-    require_stamp_font(style)
+    if stamp_enabled:
+        require_stamp_font(style)
     numbers = page_numbers if isinstance(page_numbers, PageNumberStyle) else DEFAULT_PAGE_NUMBERS
     if numbers.enabled:
         require_stamp_font(StampStyle(numbers.color, numbers.size, numbers.font))
@@ -59,6 +62,7 @@ def write_jobs(
                 style=style,
                 parts=job.parts or None,
                 page_numbers=numbers,
+                draw_stamp=stamp_enabled,
             )
             dest.mkdir(parents=True, exist_ok=True)
             target = _checked_output_path(dest, job.filename)

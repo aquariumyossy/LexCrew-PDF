@@ -6,14 +6,16 @@ from pathlib import Path
 
 from .layout import Card, Layout, PageRow, Slot, resolve_stored_path
 from .names import (
+    FilenameBook,
     branch_number,
     display_label,
     document_title,
     exhibit_number,
-    filename_stem_token,
     output_filename,
     shown_number,
     stamp_label,
+    template_has_number,
+    title_only_filename,
 )
 from .pages import GROUP_PRIMARY, resolve_buckets
 from .stamp import inspect_source_pages
@@ -76,6 +78,7 @@ def jobs_from_layout(layout: Layout, folder: Path) -> PlanBuild:
     errors: list[dict] = []
     preserve: list[str] = []
     warnings: list[dict] = []
+    book = FilenameBook(layout.label_template, layout.stamp_enabled)
     for card in layout.cards:
         built, card_errors, card_preserve, card_warnings = _jobs_for_card(
             layout.label_template,
@@ -83,6 +86,7 @@ def jobs_from_layout(layout: Layout, folder: Path) -> PlanBuild:
             folder,
             merge_branches=layout.merge_branches,
             shown=shown_number(layout.first_number, card.number),
+            book=book,
         )
         jobs.extend(built)
         errors.extend(card_errors)
@@ -131,6 +135,7 @@ def _jobs_for_card(
     *,
     merge_branches: bool,
     shown: int,
+    book: FilenameBook,
 ) -> tuple[list[OutputJob], list[dict], list[str], list[dict]]:
     flat = _flat_files(card)
     if not flat:
@@ -144,11 +149,11 @@ def _jobs_for_card(
         )
     except Exception as exc:
         return [], [_card_error(card, f"原本を開けません。{exc}")], _fallback_names(
-            series, card, files_per_slot, merge_branches=merge_branches, shown=shown,
+            series, card, files_per_slot, merge_branches=merge_branches, shown=shown, book=book,
         ), []
     if not natural:
         return [], [_card_error(card, "ページがありません。")], _fallback_names(
-            series, card, files_per_slot, merge_branches=merge_branches, shown=shown,
+            series, card, files_per_slot, merge_branches=merge_branches, shown=shown, book=book,
         ), []
     rows = _page_rows(card.pages)
     buckets = resolve_buckets(list(natural), rows, files_per_slot)
@@ -169,8 +174,8 @@ def _jobs_for_card(
             number=card.number,
             sources=resolved,
             stamp=stamp_label(series, shown, branch),
-            exhibit=exhibit_number(series, shown, branch),
-            filename=output_filename(series, shown, branch, title),
+            exhibit=_exhibit(series, shown, branch),
+            filename="",
             rotation=slot.rotation,
             split_a4=card.split_a4,
             pages=pages,
@@ -191,13 +196,24 @@ def _jobs_for_card(
     if merge_branches and len(jobs) >= 2 and all(job.pages is not None for job in jobs):
         indexes = [job.slot_index for job in jobs]
         if slots_share_one_file(page_counts):
-            return [_merged_job(series, card, jobs, shown)], [], [], []
+            return [_merged_job(series, card, jobs, shown, book)], [], [], []
         missing = [index for index in range(indexes[0], indexes[-1] + 1) if index not in indexes]
-        return jobs, [], [], [{
+        return [_named_job(job, book, shown, len(card.slots)) for job in jobs], [], [], [{
             "number": card.number,
             "message": branch_gap_warning(series, card, missing, shown),
         }]
-    return jobs, [], [], []
+    return [_named_job(job, book, shown, len(card.slots)) for job in jobs], [], [], []
+
+
+def _named_job(job: OutputJob, book: FilenameBook, shown: int, slot_count: int) -> OutputJob:
+    branch = branch_number(job.slot_index, slot_count)
+    return replace(job, filename=book.claim(shown, branch, job.title))
+
+
+def _exhibit(series: str, shown: int, branch: int | None) -> str:
+    if not template_has_number(series):
+        return ""
+    return exhibit_number(series, shown, branch)
 
 
 def slots_share_one_file(page_counts: list[int]) -> bool:
@@ -224,7 +240,14 @@ def page_label(
     return page_index + 1, total
 
 
-def file_merge_choice(series: str, card: Card, merge_branches: bool, shown: int) -> MergeChoice:
+def file_merge_choice(
+    series: str,
+    card: Card,
+    merge_branches: bool,
+    shown: int,
+    *,
+    book: FilenameBook | None = None,
+) -> MergeChoice:
     """ファイルのある枝番だけで合体を決める。原本は開かない。"""
     if not merge_branches or len(card.slots) < 2:
         return MergeChoice()
@@ -239,9 +262,18 @@ def file_merge_choice(series: str, card: Card, merge_branches: bool, shown: int)
     start = branch_number(filled[0], slot_count)
     end = branch_number(filled[-1], slot_count)
     title = merged_document_title(card)
+    if book is not None:
+        filename = book.claim(shown, start, title, branch_end=end)
+        token = book.token(shown, start, end, filename)
+    elif template_has_number(series):
+        filename = output_filename(series, shown, start, title, branch_end=end)
+        token = FilenameBook(series, True).token(shown, start, end, filename)
+    else:
+        filename = title_only_filename(title)
+        token = filename
     return MergeChoice(
-        filename=output_filename(series, shown, start, title, branch_end=end),
-        token=filename_stem_token(series, shown, start, end),
+        filename=filename,
+        token=token,
         included=tuple(filled),
     )
 
@@ -260,12 +292,19 @@ def merged_document_title(card: Card) -> str:
 
 
 def branch_gap_warning(series: str, card: Card, missing: list[int], shown: int) -> str:
-    """番号が飛ぶのでまとめない、という案内。印の番号は付け替えない。"""
+    """番号が飛ぶのでまとめない、という案内。印の番号は付け替えない。
+
+    N が無い形には枝番の「の１」が無いので、何番目の枝番かで案内する。
+    """
     slot_count = len(card.slots)
+    numbered = template_has_number(series)
     empty = []
     excluded = []
     for index in missing:
-        label = display_label(series, shown, index, slot_count)
+        if numbered:
+            label = display_label(series, shown, index, slot_count)
+        else:
+            label = f"{index + 1}番目の枝番"
         if card.slots[index].files:
             excluded.append(label)
         else:
@@ -276,10 +315,15 @@ def branch_gap_warning(series: str, card: Card, missing: list[int], shown: int) 
     if excluded:
         parts.append(f"{_and_join(excluded)}に出すページが無い")
     reason = "、".join(parts)
-    if excluded and not empty:
-        tail = "その枝番を削除すると、残った番号が詰まります。"
+    if numbered:
+        if excluded and not empty:
+            tail = "その枝番を削除すると、残った番号が詰まります。"
+        else:
+            tail = "空の枝番を削除すると番号が詰まります。"
+    elif excluded and not empty:
+        tail = "その枝番を削除すると、残った枝番がまとまります。"
     else:
-        tail = "空の枝番を削除すると番号が詰まります。"
+        tail = "空の枝番を削除すると、残った枝番がまとまります。"
     return f"{reason}ため、まとめて出力しません。{tail}"
 
 
@@ -291,7 +335,7 @@ def _and_join(labels: list[str]) -> str:
     return "、".join(labels[:-1]) + "と" + labels[-1]
 
 
-def _merged_job(series: str, card: Card, jobs: list[OutputJob], shown: int) -> OutputJob:
+def _merged_job(series: str, card: Card, jobs: list[OutputJob], shown: int, book: FilenameBook) -> OutputJob:
     """同じ号証の枝番を、1つの PDF にする。印は各枝番の先頭ページ。"""
     slot_count = len(card.slots)
     first = jobs[0]
@@ -317,7 +361,7 @@ def _merged_job(series: str, card: Card, jobs: list[OutputJob], shown: int) -> O
         sources=first.sources,
         stamp=first.stamp,
         exhibit=first.exhibit,
-        filename=output_filename(series, shown, start, title, branch_end=end),
+        filename=book.claim(shown, start, title, branch_end=end),
         rotation=first.rotation,
         split_a4=card.split_a4,
         pages=None,
@@ -366,8 +410,9 @@ def _fallback_names(
     *,
     merge_branches: bool,
     shown: int,
+    book: FilenameBook,
 ) -> list[str]:
-    choice = file_merge_choice(series, card, merge_branches, shown)
+    choice = file_merge_choice(series, card, merge_branches, shown, book=book)
     if choice.filename:
         return [choice.filename]
     slot_count = len(card.slots)
@@ -375,8 +420,7 @@ def _fallback_names(
     for slot_index, count in enumerate(files_per_slot):
         if not count:
             continue
-        names.append(output_filename(
-            series,
+        names.append(book.claim(
             shown,
             branch_number(slot_index, slot_count),
             _slot_document_title(card.slots[slot_index]),

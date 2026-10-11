@@ -14,6 +14,15 @@ def _require_font():
         pytest.skip("游明朝がありません")
 
 
+def _use_cjk_font(monkeypatch) -> None:
+    if os.path.isfile(yu_mincho_path()):
+        return
+    fallback = "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf"
+    if not os.path.isfile(fallback):
+        pytest.skip("游明朝がありません")
+    monkeypatch.setattr("lexcrew_pdf.stamp.yu_mincho_path", lambda: fallback)
+
+
 def _pdf(path, text):
     document = fitz.open()
     page = document.new_page(width=595, height=842)
@@ -254,3 +263,121 @@ def test_output_is_only_under_shoko(tmp_path):
     write_jobs(tmp_path, (job,), last_written=())
     assert (tmp_path / "LexCrew-PDF-Downloads" / "甲001：契約.pdf").is_file()
     assert not (tmp_path / "甲001：契約.pdf").exists()
+
+
+def test_stamp_off_writes_the_title_keeps_other_files_and_drops_the_old_name(tmp_path, monkeypatch):
+    from lexcrew_pdf.session import Session
+
+    source = tmp_path / "契約書.pdf"
+    other = tmp_path / "同じ書名.pdf"
+    _pdf(source, "BODY")
+    _pdf(other, "ALSO")
+    monkeypatch.setattr("lexcrew_pdf.stamp.yu_mincho_path", lambda: str(tmp_path / "missing.ttf"))
+    session = Session(tmp_path)
+    session.add_file(1, 0, str(source))
+    session.set_title(1, "契約書", 0)
+    session.add_file(2, 0, str(other))
+    session.set_title(2, "契約書", 0)
+    session.set_stamp_enabled(False)
+    from dataclasses import replace
+
+    session.layout = replace(session.layout, last_written=("甲001 契約書.pdf",))
+    dest = tmp_path / "LexCrew-PDF-Downloads"
+    old = dest / "甲001 契約書.pdf"
+    old.write_bytes(b"old-numbered")
+    note = dest / "メモ.pdf"
+    note.write_bytes(b"keep")
+    result = session.generate()
+    assert result["ok"] is True
+    assert (dest / "契約書.pdf").is_file()
+    assert (dest / "契約書 (2).pdf").is_file()
+    assert not old.exists()
+    assert note.read_bytes() == b"keep"
+    assert not list(dest.glob("*.writing"))
+    assert set(session.layout.last_written) == {"契約書.pdf", "契約書 (2).pdf"}
+    document = fitz.open(dest / "契約書.pdf")
+    try:
+        assert "BODY" in document[0].get_text("text")
+        assert "甲" not in document[0].get_text("text")
+        assert _red_rect(document[0]) == []
+    finally:
+        document.close()
+    session.set_title(2, "領収書", 0)
+    again = session.generate()
+    assert again["ok"] is True
+    assert not (dest / "契約書 (2).pdf").exists()
+    assert (dest / "契約書.pdf").is_file()
+    assert (dest / "領収書.pdf").is_file()
+    assert note.read_bytes() == b"keep"
+    assert set(session.layout.last_written) == {"契約書.pdf", "領収書.pdf"}
+
+
+def test_fixed_template_writes_that_text_and_a_title_filename(tmp_path, monkeypatch):
+    _use_cjk_font(monkeypatch)
+    from lexcrew_pdf.session import Session
+
+    source = tmp_path / "説明.pdf"
+    _pages(source, ("LEFT", "RIGHT"))
+    session = Session(tmp_path)
+    session.set_series("参考資料")
+    session.add_file(1, 0, str(source))
+    session.set_title(1, "説明", 0)
+    result = session.generate()
+    assert result["ok"] is True
+    dest = tmp_path / "LexCrew-PDF-Downloads" / "説明.pdf"
+    assert dest.is_file()
+    assert set(session.layout.last_written) == {"説明.pdf"}
+    document = fitz.open(dest)
+    try:
+        assert document.page_count == 2
+        assert "参考資料" in document[0].get_text("text")
+        assert "LEFT" in document[0].get_text("text")
+        assert "参考資料" not in document[1].get_text("text")
+        assert "RIGHT" in document[1].get_text("text")
+        assert _red_rect(document[0])
+        assert _red_rect(document[1]) == []
+    finally:
+        document.close()
+
+
+def test_stamp_off_still_masks_and_numbers_pages_when_the_font_exists(tmp_path, monkeypatch):
+    _use_cjk_font(monkeypatch)
+    from lexcrew_pdf.session import Session
+    from lexcrew_pdf.stamp import PageNumberStyle
+
+    source = tmp_path / "secret.pdf"
+    document = fitz.open()
+    page = document.new_page(width=595, height=842)
+    page.insert_text((72, 120), "SECRET")
+    page.insert_text((72, 240), "VISIBLE")
+    document.new_page(width=595, height=842)
+    document[1].insert_text((72, 120), "NEXT")
+    document.save(source)
+    document.close()
+    opened = fitz.open(source)
+    try:
+        word = [item for item in opened[0].get_text("words") if item[4] == "SECRET"][0]
+    finally:
+        opened.close()
+    session = Session(tmp_path)
+    session.add_file(1, 0, str(source))
+    session.set_title(1, "秘密", 0)
+    session.add_mask(1, 0, 0, 0, 0, word[0], word[1], word[2] - word[0], word[3] - word[1])
+    session.set_stamp_enabled(False)
+    from dataclasses import replace
+
+    session.layout = replace(session.layout, page_numbers=PageNumberStyle(enabled=True))
+    result = session.generate()
+    assert result["ok"] is True
+    written = fitz.open(tmp_path / "LexCrew-PDF-Downloads" / "秘密.pdf")
+    try:
+        first = written[0].get_text("text")
+        second = written[1].get_text("text")
+        assert "SECRET" not in first
+        assert "VISIBLE" in first
+        assert "甲" not in first
+        assert "1 / 2" in first or "\x00" in first
+        assert "2 / 2" in second or "\x00" in second
+        assert _red_rect(written[0]) == []
+    finally:
+        written.close()

@@ -233,6 +233,12 @@ class Api:
             self._notify_editor("window.reloadAppearance()")
         return view
 
+    def set_stamp_enabled(self, enabled: bool) -> dict:
+        view = self._run(lambda: self.session.set_stamp_enabled(bool(enabled)))
+        if view.get("ok") is not False:
+            self._notify_editor("window.reloadAppearance()")
+        return view
+
     def set_stamp_style(self, color, size, font) -> dict:
         from .stamp import StampFontMissing
 

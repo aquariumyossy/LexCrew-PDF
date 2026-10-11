@@ -103,6 +103,7 @@ class Layout:
     merge_branches: bool = True
     first_number: int = 1
     page_numbers: PageNumberStyle = DEFAULT_PAGE_NUMBERS
+    stamp_enabled: bool = True
 
 
 def default_layout() -> Layout:
@@ -117,6 +118,7 @@ def default_layout() -> Layout:
         merge_branches=True,
         first_number=1,
         page_numbers=DEFAULT_PAGE_NUMBERS,
+        stamp_enabled=True,
     )
 
 
@@ -243,6 +245,8 @@ def parse_layout(raw: dict) -> Layout:
         raise ValueError("配置ファイルを読めません。")
     if "mergeBranches" in raw and raw.get("mergeBranches") is not True and raw.get("mergeBranches") is not False:
         raise ValueError("配置ファイルを読めません。")
+    if "stampEnabled" in raw and raw.get("stampEnabled") is not True and raw.get("stampEnabled") is not False:
+        raise ValueError("配置ファイルを読めません。")
     # キーが無い古い配置は、枝番をまとめて出す。明示した false だけ分ける。
     if "mergeBranches" not in raw:
         merge_branches = True
@@ -252,6 +256,11 @@ def parse_layout(raw: dict) -> Layout:
     if isinstance(first_number, bool) or not isinstance(first_number, int) or not 1 <= first_number <= FIRST_NUMBER_MAX:
         raise ValueError("配置ファイルを読めません。")
     page_numbers = page_number_style_from_json(raw["pageNumbers"]) if "pageNumbers" in raw else DEFAULT_PAGE_NUMBERS
+    # キーが無い古い配置は、印を付ける。明示した false だけ外す。
+    if "stampEnabled" not in raw:
+        stamp_enabled = True
+    else:
+        stamp_enabled = raw.get("stampEnabled") is True
     return Layout(
         series=series,
         enabled_series=enabled_series,
@@ -263,6 +272,7 @@ def parse_layout(raw: dict) -> Layout:
         merge_branches=merge_branches,
         first_number=first_number,
         page_numbers=page_numbers,
+        stamp_enabled=stamp_enabled,
     )
 
 
@@ -336,6 +346,8 @@ def layout_to_json(layout: Layout) -> dict:
     record = stamp_record(layout.stamp)
     if record is not None:
         payload["stamp"] = record
+    if not layout.stamp_enabled:
+        payload["stampEnabled"] = False
     return payload
 
 

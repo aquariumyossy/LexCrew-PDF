@@ -53,7 +53,15 @@ function render() {
   const series = document.getElementById("series");
   if (document.activeElement !== series) series.value = view.labelTemplate || "";
   const firstNumber = document.getElementById("first-number");
+  const usesNumber = String(view.labelTemplate || "甲第N号証").includes("N");
   if (document.activeElement !== firstNumber) firstNumber.value = String(view.firstNumber || 1);
+  firstNumber.disabled = !usesNumber;
+  firstNumber.title = usesNumber ? "" : "この形では番号を使いません";
+  const stampOpen = document.getElementById("stamp-open");
+  const stampOn = view.stampEnabled !== false;
+  stampOpen.dataset.tip = stampOn
+    ? "印を付けるか、色、大きさ、フォントを変える"
+    : "印は付きません。押すと、付けるかと見た目を変えられます";
   document.getElementById("output").textContent = view.outputDir ? `保存先 ${view.outputDir}` : "";
   const separate = !view.mergeBranches;
   const merge = document.getElementById("merge-branches");
@@ -234,10 +242,17 @@ function slotCard(card, slot, isLast) {
   return article;
 }
 
+function filenamesUseNumbers() {
+  if (!view || view.stampEnabled === false) return false;
+  return String(view.labelTemplate || "").includes("N");
+}
+
 function titleFromFilename(text) {
   const value = String(text || "").trim();
-  const marked = value.match(/^[^\d]+\d{3}(?:-\d+(?:~\d+)?)?[ ：:](.+?)(?:\.pdf)?$/);
-  if (marked) return marked[1];
+  if (filenamesUseNumbers()) {
+    const marked = value.match(/^[^\d]+\d{3}(?:-\d+(?:~\d+)?)?[ ：:](.+?)(?:\.pdf)?$/);
+    if (marked) return marked[1];
+  }
   return value.replace(/\.pdf$/i, "");
 }
 
@@ -566,7 +581,7 @@ document.getElementById("page-numbers").addEventListener("click", () => {
 document.getElementById("clear").addEventListener("click", async () => {
   if (!api || generating) return;
   const editing = Boolean(view && view.editor);
-  let message = "カードを初期状態に戻します。原本、書名、枝番、追加したカード、ページ順、番号の種類、開始番号、枝番のまとめ、白黒、頁番号、印の色、印の大きさ、印のフォントは消え、甲第１号証から甲第６号証の空のカードになります。生成済みの証拠PDFは残ります。";
+  let message = "カードを初期状態に戻します。原本、書名、枝番、追加したカード、ページ順、番号の種類、開始番号、枝番のまとめ、白黒、頁番号、印を付けるか、印の色、印の大きさ、印のフォントは消え、甲第１号証から甲第６号証の空のカードになります。生成済みの証拠PDFは残ります。";
   if (editing) message += "開いている編集ウィンドウも閉じます。";
   if (!window.confirm(message)) return;
   const button = document.getElementById("clear");
@@ -624,11 +639,24 @@ function chosenStampColor() {
   return chosen ? chosen.dataset.color : "#ff0000";
 }
 
+function stampSampleText() {
+  const template = view && view.labelTemplate;
+  if (template && !String(template).includes("N")) return template;
+  return "甲第１１号証の２";
+}
+
+function paintStampEnabled() {
+  const button = document.getElementById("stamp-enabled");
+  const on = button.classList.contains("is-on");
+  button.setAttribute("aria-pressed", on ? "true" : "false");
+}
+
 function paintStampSample() {
   const size = Number(stampSize.value);
   const color = chosenStampColor();
   const font = chosenStampFont();
   stampReadout.textContent = `${size} pt`;
+  stampSample.textContent = stampSampleText();
   stampSample.style.color = color;
   stampSample.style.borderColor = color;
   stampSample.style.fontSize = `${size}pt`;
@@ -646,6 +674,9 @@ function paintStampSample() {
 }
 
 function fillStampDialog(stamp) {
+  const enabled = document.getElementById("stamp-enabled");
+  enabled.classList.toggle("is-on", !view || view.stampEnabled !== false);
+  paintStampEnabled();
   const next = stamp || { color: "#ff0000", size: 11, font: "mincho" };
   const known = stampColors.some((button) => button.dataset.color === next.color);
   stampColors.forEach((button) => {
@@ -681,6 +712,18 @@ stampDialog.addEventListener("click", (event) => {
   const inside = event.clientX >= box.left && event.clientX <= box.right
     && event.clientY >= box.top && event.clientY <= box.bottom;
   if (!inside) stampDialog.close();
+});
+document.getElementById("stamp-enabled").addEventListener("click", async () => {
+  const button = document.getElementById("stamp-enabled");
+  button.classList.toggle("is-on");
+  paintStampEnabled();
+  if (!api) return;
+  const result = await api.set_stamp_enabled(button.classList.contains("is-on"));
+  if (result && result.ok === false) {
+    button.classList.toggle("is-on", view && view.stampEnabled !== false);
+    paintStampEnabled();
+  }
+  applyView(result);
 });
 stampColors.forEach((button) => {
   button.addEventListener("click", () => {

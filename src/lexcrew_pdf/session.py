@@ -11,12 +11,13 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .names import (
+    FilenameBook,
     branch_number,
     display_label,
     document_title,
-    output_filename,
     require_first_number,
     shown_number,
+    title_only_filename,
 )
 from .layout import (
     OUTPUT_DIR_NAME,
@@ -133,6 +134,7 @@ class Session:
     def view(self) -> dict:
         output = self.folder / OUTPUT_DIR_NAME if self.folder else None
         editing = self.open_editor
+        book = FilenameBook(self.layout.label_template, self.layout.stamp_enabled)
         return {
             "folder": str(self.folder) if self.folder else "",
             "outputDir": str(output) if output else "",
@@ -143,11 +145,12 @@ class Session:
             "firstNumber": self.layout.first_number,
             "pageNumbers": _page_number_view(self.layout.page_numbers),
             "stamp": _stamp_view(self.layout.stamp),
+            "stampEnabled": self.layout.stamp_enabled,
             "enabledSeries": list(self.layout.enabled_series),
             "canAddSeries": len(self.layout.enabled_series) < 5,
             "message": self.notice,
             "editor": None if editing is None else {"number": editing.number, "slot": editing.slot_index},
-            "cards": [self._card_view(card) for card in self.layout.cards],
+            "cards": [self._card_view(card, book) for card in self.layout.cards],
         }
 
     @_locked
@@ -183,15 +186,24 @@ class Session:
         from .stamp import a4_points, stamp_frame
 
         width, height = a4_points()
+        label = display_label(
+            self.layout.label_template,
+            self._shown(card.number),
+            editing.slot_index,
+            len(card.slots),
+        )
+        frame = None
+        if self.layout.stamp_enabled:
+            frame = stamp_frame(slot.stamp_dx, slot.stamp_dy, self.layout.stamp, label)
         return {
             "number": editing.number,
             "slot": editing.slot_index,
-            "label": display_label(self.layout.label_template, self._shown(card.number), editing.slot_index, len(card.slots)),
+            "label": label,
             "rotation": slot.rotation,
             "split": card.split_a4,
             "pageWidth": width,
             "pageHeight": height,
-            "stampFrame": stamp_frame(slot.stamp_dx, slot.stamp_dy, self.layout.stamp),
+            "stampFrame": frame,
         }
 
     @_locked
@@ -335,6 +347,15 @@ class Session:
         if first == self.layout.first_number:
             return self.view()
         self.layout = replace(self.layout, first_number=first)
+        self._persist()
+        return self.view()
+
+    @_locked
+    def set_stamp_enabled(self, enabled: bool) -> dict:
+        chosen = enabled is True
+        if chosen == self.layout.stamp_enabled:
+            return self.view()
+        self.layout = replace(self.layout, stamp_enabled=chosen)
         self._persist()
         return self.view()
 
@@ -780,6 +801,7 @@ class Session:
             grayscale = self.layout.grayscale
             style = self.layout.stamp
             numbers = self.layout.page_numbers
+            stamp_enabled = self.layout.stamp_enabled
             masks = card.masks
             trims = card.trims
             skews = card.skews
@@ -822,6 +844,7 @@ class Session:
                     skews=skew_map,
                     numbers=numbers,
                     page_number=label,
+                    draw_stamp=stamp_enabled,
                 )
                 thumb = base64.b64encode(jpeg).decode("ascii")
             elif source_refs:
@@ -879,7 +902,7 @@ class Session:
             grayscale=layout.grayscale,
             stamp_dx=job.stamp_dx,
             stamp_dy=job.stamp_dy,
-            draw_stamp=not bare,
+            draw_stamp=(not bare) and layout.stamp_enabled,
             # 編集画面の黒は要素が描く。ここに焼くと、X で外した直後に下の画像が残る。
             masks=(),
             style=layout.stamp,
@@ -968,6 +991,7 @@ class Session:
                 grayscale=grayscale,
                 style=style,
                 page_numbers=page_numbers,
+                stamp_enabled=layout.stamp_enabled,
             )
         except StampFontMissing as exc:
             return {"ok": False, **self.view(), "message": str(exc)}
@@ -1017,7 +1041,7 @@ class Session:
             "message": message,
         }
 
-    def _card_view(self, card: Card) -> dict:
+    def _card_view(self, card: Card, book: FilenameBook) -> dict:
         from .plan import file_merge_choice
 
         slot_count = len(card.slots)
@@ -1027,6 +1051,7 @@ class Session:
             card,
             self.layout.merge_branches,
             shown,
+            book=book,
         )
         slots = []
         for index, slot in enumerate(card.slots):
@@ -1034,7 +1059,7 @@ class Session:
             slots.append({
                 "index": index,
                 "label": display_label(self.layout.label_template, shown, index, slot_count),
-                "filename": choice.filename if choice.filename and (index == 0 or included) else self._slot_filename(card, index),
+                "filename": choice.filename if choice.filename and (index == 0 or included) else self._slot_filename(card, index, book),
                 "title": slot.title,
                 "rotation": slot.rotation,
                 "outputNote": f"→ {choice.token} に含めて出力" if included else "",
@@ -1053,17 +1078,14 @@ class Session:
             "message": self.card_errors.get(card.number, ""),
         }
 
-    def _slot_filename(self, card: Card, slot_index: int) -> str:
+    def _slot_filename(self, card: Card, slot_index: int, book: FilenameBook) -> str:
         slot = card.slots[slot_index]
         first = slot.files[0] if slot.files else None
         title = document_title(slot.title, first)
         branch = branch_number(slot_index, len(card.slots))
-        return output_filename(
-            self.layout.label_template,
-            self._shown(card.number),
-            branch,
-            title,
-        )
+        if book.numbered or slot.files:
+            return book.claim(self._shown(card.number), branch, title)
+        return title_only_filename(title)
 
     def _shown(self, ordinal: int) -> int:
         return shown_number(self.layout.first_number, ordinal)

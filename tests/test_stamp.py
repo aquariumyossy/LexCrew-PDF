@@ -1230,3 +1230,56 @@ def test_grayscale_keeps_the_chosen_blue_stamp(tmp_path):
         assert _stamp_span(page, "甲第１号証")["color"] == 255
     finally:
         document.close()
+
+
+def _red_pixel_width(data: bytes) -> int:
+    document = fitz.open(stream=data, filetype="jpeg")
+    try:
+        pix = document[0].get_pixmap()
+        samples = pix.samples
+        step = pix.n
+        left = pix.width
+        right = -1
+        for y in range(pix.height):
+            row = y * pix.width * step
+            for x in range(pix.width):
+                index = row + x * step
+                red, green, blue = samples[index], samples[index + 1], samples[index + 2]
+                if red > 180 and red > green + 40 and red > blue + 40:
+                    if x < left:
+                        left = x
+                    if x > right:
+                        right = x
+        return 0 if right < 0 else right - left + 1
+    finally:
+        document.close()
+
+
+def test_numbered_stamp_keeps_the_sample_box_and_a_long_plain_label_grows(tmp_path):
+    _require_font()
+    source = tmp_path / "a.pdf"
+    _write_pdf(source, width=595, height=842, text="BODY")
+    sample = stamp_frame(0, 0)
+    numbered = stamp_frame(0, 0, label="疎甲第１０号証の１", fit_label=False)
+    assert numbered["boxWidth"] == sample["boxWidth"]
+    assert numbered["originX"] == sample["originX"]
+    long_label = "証拠説明資料" * 4
+    plain = stamp_frame(0, 0, label=long_label, fit_label=False)
+    grown = stamp_frame(0, 0, label=long_label, fit_label=True)
+    assert plain["boxWidth"] == sample["boxWidth"]
+    assert grown["boxWidth"] > sample["boxWidth"]
+    held = _open_stamped(stamp_sources_to_pdf([str(source)], "疎甲第１０号証の１", fit_stamp=False))
+    widened = _open_stamped(stamp_sources_to_pdf([str(source)], long_label, fit_stamp=True))
+    try:
+        held_rect = _red_drawings(held[0])[0]["rect"]
+        wide_rect = _red_drawings(widened[0])[0]["rect"]
+        assert abs((held_rect.x1 - held_rect.x0) - sample["boxWidth"]) < 0.2
+        assert abs((wide_rect.x1 - wide_rect.x0) - grown["boxWidth"]) < 0.2
+        dragged = stamp_frame(-80, 40, label=long_label, fit_label=True)
+        assert dragged["boxWidth"] == grown["boxWidth"]
+    finally:
+        held.close()
+        widened.close()
+    sample_jpeg = render_stamped_page_jpeg([str(source)], long_label, 0, zoom=1, fit_stamp=False)
+    grown_jpeg = render_stamped_page_jpeg([str(source)], long_label, 0, zoom=1, fit_stamp=True)
+    assert _red_pixel_width(grown_jpeg) > _red_pixel_width(sample_jpeg)

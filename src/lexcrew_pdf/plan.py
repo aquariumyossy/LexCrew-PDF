@@ -61,6 +61,7 @@ class PlanBuild:
     errors: tuple[dict, ...]
     preserve: tuple[str, ...]
     warnings: tuple[dict, ...] = ()
+    kept: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -78,7 +79,13 @@ def jobs_from_layout(layout: Layout, folder: Path) -> PlanBuild:
     errors: list[dict] = []
     preserve: list[str] = []
     warnings: list[dict] = []
-    book = FilenameBook(layout.label_template, layout.stamp_enabled)
+    from .write import foreign_output_names
+
+    book = FilenameBook(
+        layout.label_template,
+        layout.stamp_enabled,
+        blocked=foreign_output_names(folder, layout.last_written),
+    )
     for card in layout.cards:
         built, card_errors, card_preserve, card_warnings = _jobs_for_card(
             layout.label_template,
@@ -97,6 +104,7 @@ def jobs_from_layout(layout: Layout, folder: Path) -> PlanBuild:
         errors=tuple(errors),
         preserve=tuple(preserve),
         warnings=tuple(warnings),
+        kept=tuple(book.kept),
     )
 
 

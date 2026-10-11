@@ -162,7 +162,7 @@ function slotCard(card, slot, isLast) {
   title.disabled = locked;
   title.readOnly = sharesFile;
   if (!sharesFile) {
-    title.addEventListener("change", () => api.set_title(card.number, titleFromFilename(title.value), slot.index).then(applyView));
+    title.addEventListener("change", () => api.set_title(card.number, title.value, slot.index).then(applyView));
   }
   meta.append(label, title);
   if (slot.outputNote) {
@@ -240,20 +240,6 @@ function slotCard(card, slot, isLast) {
   }
   article.appendChild(meta);
   return article;
-}
-
-function filenamesUseNumbers() {
-  if (!view || view.stampEnabled === false) return false;
-  return String(view.labelTemplate || "").includes("N");
-}
-
-function titleFromFilename(text) {
-  const value = String(text || "").trim();
-  if (filenamesUseNumbers()) {
-    const marked = value.match(/^[^\d]+\d{3}(?:-\d+(?:~\d+)?)?[ ：:](.+?)(?:\.pdf)?$/);
-    if (marked) return marked[1];
-  }
-  return value.replace(/\.pdf$/i, "");
 }
 
 function freezeActions(actions, locked) {
@@ -596,13 +582,43 @@ document.getElementById("clear").addEventListener("click", async () => {
 });
 
 document.getElementById("generate").addEventListener("click", async () => {
+  if (!api || generating) return;
   generating = true;
-  document.getElementById("generate").disabled = true;
-  const result = await api.generate();
-  generating = false;
-  if (result && result.message) showBanner(result.message);
-  applyView(result);
+  const button = document.getElementById("generate");
+  button.disabled = true;
+  try {
+    const preview = await api.preview_generate();
+    if (!confirmGenerate(preview)) return;
+    const result = await api.generate();
+    if (result && result.message) showBanner(result.message);
+    applyView(result);
+  } finally {
+    generating = false;
+    button.disabled = false;
+  }
 });
+
+function confirmGenerate(preview) {
+  const replace = (preview && preview.replace) || [];
+  const remove = (preview && preview.delete) || [];
+  const keep = (preview && preview.keep) || [];
+  if (!replace.length && !remove.length && !keep.length) return true;
+  const lines = [];
+  if (replace.length) {
+    lines.push("次のファイルを置き換えます。");
+    replace.forEach((name) => lines.push(name));
+  }
+  if (remove.length) {
+    lines.push("次のファイルを削除します。");
+    remove.forEach((name) => lines.push(name));
+  }
+  if (keep.length) {
+    lines.push("次のファイルは残し、別名で書きます。");
+    keep.forEach((row) => lines.push(`${row.existing} は残します。${row.writing} を書きます。`));
+  }
+  lines.push("続けますか？");
+  return window.confirm(lines.join("\n"));
+}
 
 const help = document.getElementById("help");
 document.getElementById("help-open").addEventListener("click", () => {

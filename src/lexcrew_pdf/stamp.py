@@ -564,6 +564,7 @@ def stamp_sources_to_pdf(
     parts=None,
     page_numbers: PageNumberStyle | None = None,
     draw_stamp: bool = True,
+    fit_stamp: bool = False,
 ) -> bytes:
     """原本を順にA4縦へ載せる。証拠番号は出力の1ページ目だけに押す。
 
@@ -579,6 +580,7 @@ def stamp_sources_to_pdf(
     style を省いたときは赤、11 ポイント、明朝。
     page_numbers を付けたときは、2ページ以上のまとまりを 1 から振る。パターン n/N は「1 / 15」、n は「1」。1ページには付けない。枝番を1つの PDF にまとめても、の１との２は別々に数える。
     draw_stamp が偽のときは印を描かない。マスキング、端の削り、傾き、白黒、頁番号はそのまま行う。
+    fit_stamp が真のときだけ、見本より広い印に合わせて枠を広げる。番号つきの印は見本のまま。
     """
     if not source_paths:
         raise ValueError("原本がありません。")
@@ -592,7 +594,8 @@ def stamp_sources_to_pdf(
         labels = [label]
         if parts:
             labels.extend(run.stamp for run in parts)
-        box_w, box_h = _stamp_box(font_path, chosen, _widest_label(font_path, chosen, labels))
+        box_text = _widest_label(font_path, chosen, labels) if fit_stamp else None
+        box_w, box_h = _stamp_box(font_path, chosen, box_text)
     if numbers.enabled:
         require_stamp_font(StampStyle(numbers.color, numbers.size, numbers.font))
     output = fitz.open()
@@ -657,6 +660,7 @@ def render_stamped_page_jpeg(
     style: StampStyle | None = None,
     numbers: PageNumberStyle | None = None,
     page_number: tuple[int, int] | None = None,
+    fit_stamp: bool = False,
 ) -> bytes:
     """指定ページだけを印字してJPEGにする。甲号証フォルダへは書かない。"""
     if page_index < 0:
@@ -667,7 +671,7 @@ def render_stamped_page_jpeg(
     box_h = 0.0
     if draw_stamp:
         font_path = require_stamp_font(chosen)
-        box_w, box_h = _stamp_box(font_path, chosen, label)
+        box_w, box_h = _stamp_box(font_path, chosen, label if fit_stamp else None)
     output = fitz.open()
     try:
         seen = 0
@@ -1338,14 +1342,21 @@ def clamp_stamp_offset(dx: int, dy: int, *, box_w: float, box_h: float) -> tuple
     )
 
 
-def stamp_frame(dx: int = 0, dy: int = 0, style: StampStyle | None = None, label: str | None = None) -> dict | None:
+def stamp_frame(
+    dx: int = 0,
+    dy: int = 0,
+    style: StampStyle | None = None,
+    label: str | None = None,
+    *,
+    fit_label: bool = False,
+) -> dict | None:
     """編集画面がつまみを置くための枠。選んだフォントが無いときは None。"""
     chosen = _chosen_style(style)
     try:
         font_path = require_stamp_font(chosen)
     except StampFontMissing:
         return None
-    box_w, box_h = _stamp_box(font_path, chosen, label)
+    box_w, box_h = _stamp_box(font_path, chosen, label if fit_label else None)
     page = _a4()
     clamped_dx, clamped_dy, origin_x, origin_y, x, y = clamp_stamp_offset(
         dx,

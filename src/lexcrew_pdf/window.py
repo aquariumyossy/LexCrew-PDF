@@ -363,6 +363,9 @@ class Api:
             int(number), int(source), int(page), int(part), float(zoom), slot, index,
         ))
 
+    def preview_generate(self) -> dict:
+        return self._run(self.session.preview_generate)
+
     def generate(self) -> dict:
         result = self._run(self.session.generate)
         written = result.get("written") or ()

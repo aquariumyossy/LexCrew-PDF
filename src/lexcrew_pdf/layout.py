@@ -13,6 +13,7 @@ from .names import (
     canonical_template,
     check_series,
     filename_prefix,
+    template_has_number,
 )
 from .stamp import (
     DEFAULT_PAGE_NUMBERS,
@@ -233,7 +234,8 @@ def parse_layout(raw: dict) -> Layout:
     if not isinstance(cards_raw, list):
         raise ValueError("配置ファイルを読めません。")
     stamp = stamp_style_from_json(raw.get("stamp"))
-    cards = tuple(_parse_card(item, stamp) for item in cards_raw)
+    stamp_label = None if template_has_number(label_template) else label_template
+    cards = tuple(_parse_card(item, stamp, stamp_label) for item in cards_raw)
     numbers = [card.number for card in cards]
     if len(numbers) != len(set(numbers)):
         raise ValueError("配置ファイルを読めません。")
@@ -407,7 +409,7 @@ def _empty_card(number: int) -> Card:
     return Card(number=number, split_a4=False, slots=(Slot(()),), pages=None)
 
 
-def _parse_card(raw: dict, stamp: StampStyle) -> Card:
+def _parse_card(raw: dict, stamp: StampStyle, stamp_label: str | None = None) -> Card:
     if not isinstance(raw, dict):
         raise ValueError("配置ファイルを読めません。")
     try:
@@ -424,7 +426,9 @@ def _parse_card(raw: dict, stamp: StampStyle) -> Card:
     slots_raw = raw.get("slots")
     if not isinstance(slots_raw, list) or not slots_raw:
         raise ValueError("配置ファイルを読めません。")
-    slots = tuple(_parse_slot(item, legacy_title, legacy_rotation, stamp) for item in slots_raw)
+    slots = tuple(
+        _parse_slot(item, legacy_title, legacy_rotation, stamp, stamp_label) for item in slots_raw
+    )
     pages_raw = raw.get("pages", None)
     pages = None if pages_raw is None else tuple(_parse_page(item, index) for index, item in enumerate(pages_raw))
     masks_raw = raw.get("masks", [])
@@ -465,7 +469,13 @@ def _slot_json(slot: Slot) -> dict:
     return item
 
 
-def _parse_slot(raw: dict, legacy_title: str, legacy_rotation: int, stamp: StampStyle) -> Slot:
+def _parse_slot(
+    raw: dict,
+    legacy_title: str,
+    legacy_rotation: int,
+    stamp: StampStyle,
+    stamp_label: str | None = None,
+) -> Slot:
     if not isinstance(raw, dict):
         raise ValueError("配置ファイルを読めません。")
     files = raw.get("files") or []
@@ -485,7 +495,7 @@ def _parse_slot(raw: dict, legacy_title: str, legacy_rotation: int, stamp: Stamp
         rotation = legacy_rotation
     stamp_dx = _parse_point(raw, "stampDx")
     stamp_dy = _parse_point(raw, "stampDy")
-    stamp_dx, stamp_dy = _stored_offset(stamp_dx, stamp_dy, stamp)
+    stamp_dx, stamp_dy = _stored_offset(stamp_dx, stamp_dy, stamp, stamp_label)
     return Slot(stored, title, rotation, stamp_dx, stamp_dy)
 
 
@@ -498,12 +508,12 @@ def _parse_point(raw: dict, key: str) -> int:
     return value
 
 
-def _stored_offset(dx: int, dy: int, stamp: StampStyle) -> tuple[int, int]:
+def _stored_offset(dx: int, dy: int, stamp: StampStyle, stamp_label: str | None = None) -> tuple[int, int]:
     if dx == 0 and dy == 0:
         return 0, 0
     from .stamp import stamp_frame
 
-    frame = stamp_frame(dx, dy, stamp)
+    frame = stamp_frame(dx, dy, stamp, stamp_label, fit_label=stamp_label is not None)
     if frame is None:
         return dx, dy
     return int(frame["dx"]), int(frame["dy"])

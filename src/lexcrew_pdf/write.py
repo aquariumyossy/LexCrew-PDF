@@ -1,4 +1,4 @@
-"""出力フォルダへの書き出し。前回このアプリが書いた PDF だけを消す。"""
+"""出力フォルダへの書き出し。前回このアプリが書いた PDF だけを消し、それ以外の同名は置き換えない。"""
 from __future__ import annotations
 
 import os
@@ -28,6 +28,7 @@ def write_jobs(
     style=None,
     page_numbers: PageNumberStyle | None = None,
     stamp_enabled: bool = True,
+    fit_stamp: bool = False,
 ) -> dict:
     """ジョブを書き、last_written から外れた前回分だけを消す。
 
@@ -42,9 +43,20 @@ def write_jobs(
     dest = folder / OUTPUT_DIR_NAME
     written: list[dict] = []
     errors: list[dict] = []
+    replaced: list[str] = []
     failed = set(preserve)
+    owned = set(last_written)
     for job in jobs:
         _checked_output_path(dest, job.filename)
+        target = dest / job.filename
+        if target.is_file() and job.filename not in owned:
+            failed.add(job.filename)
+            errors.append({
+                "filename": job.filename,
+                "stampLabel": job.stamp,
+                "message": "同じ名前のファイルがあるため、書けませんでした。",
+            })
+            continue
         tmp: Path | None = None
         try:
             data = stamp_sources_to_pdf(
@@ -63,12 +75,16 @@ def write_jobs(
                 parts=job.parts or None,
                 page_numbers=numbers,
                 draw_stamp=stamp_enabled,
+                fit_stamp=fit_stamp,
             )
             dest.mkdir(parents=True, exist_ok=True)
             target = _checked_output_path(dest, job.filename)
+            replacing = target.is_file()
             tmp = dest / f"{job.filename}.writing"
             tmp.write_bytes(data)
             os.replace(tmp, target)
+            if replacing:
+                replaced.append(job.filename)
             written.append({
                 "filename": job.filename,
                 "stampLabel": job.stamp,
@@ -86,11 +102,45 @@ def write_jobs(
             if tmp is not None:
                 tmp.unlink(missing_ok=True)
     keep = {row["filename"] for row in written} | failed
-    _delete_stale(dest, last_written, keep)
+    deleted = _delete_stale(dest, last_written, keep)
     return {
         "written": written,
         "errors": errors,
         "keep": tuple(sorted(keep)),
+        "replaced": tuple(replaced),
+        "deleted": tuple(deleted),
+    }
+
+
+def foreign_output_names(folder: Path, last_written: tuple[str, ...] | list[str]) -> set[str]:
+    """出力フォルダにある、このアプリが前回書いていない PDF。"""
+    dest = folder / OUTPUT_DIR_NAME
+    if not dest.is_dir():
+        return set()
+    owned = set(last_written)
+    found: set[str] = set()
+    for path in dest.iterdir():
+        if path.is_file() and path.suffix.lower() == ".pdf" and path.name not in owned:
+            found.add(path.name)
+    return found
+
+
+def pending_writes(
+    folder: Path,
+    filenames: list[str] | tuple[str, ...],
+    last_written: tuple[str, ...] | list[str],
+    kept: list[tuple[str, str]] | tuple[tuple[str, str], ...],
+) -> dict:
+    """書く前に、置き換えるファイル、消すファイル、残して別名にするファイルを返す。"""
+    dest = folder / OUTPUT_DIR_NAME
+    owned = set(last_written)
+    planned = set(filenames)
+    replace = [name for name in filenames if name in owned and (dest / name).is_file()]
+    delete = [name for name in last_written if name not in planned and (dest / name).is_file()]
+    return {
+        "replace": replace,
+        "delete": delete,
+        "keep": [{"existing": existing, "writing": writing} for existing, writing in kept],
     }
 
 
@@ -103,9 +153,10 @@ def _checked_output_path(dest: Path, filename: str) -> Path:
     return path
 
 
-def _delete_stale(dest: Path, last_written, keep: set[str]) -> None:
+def _delete_stale(dest: Path, last_written, keep: set[str]) -> list[str]:
     if not dest.is_dir():
-        return
+        return []
+    deleted: list[str] = []
     for name in last_written:
         if name in keep:
             continue
@@ -115,9 +166,11 @@ def _delete_stale(dest: Path, last_written, keep: set[str]) -> None:
             continue
         if path.is_file():
             path.unlink()
+            deleted.append(name)
     for path in list(dest.glob("*.writing")):
         if path.is_file():
             path.unlink()
+    return deleted
 
 
 def _short_error(exc: Exception) -> str:

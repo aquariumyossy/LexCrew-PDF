@@ -15,8 +15,10 @@ from .names import (
     branch_number,
     display_label,
     document_title,
+    edited_title,
     require_first_number,
     shown_number,
+    template_has_number,
     title_only_filename,
 )
 from .layout import (
@@ -134,7 +136,7 @@ class Session:
     def view(self) -> dict:
         output = self.folder / OUTPUT_DIR_NAME if self.folder else None
         editing = self.open_editor
-        book = FilenameBook(self.layout.label_template, self.layout.stamp_enabled)
+        book = self._filename_book()
         return {
             "folder": str(self.folder) if self.folder else "",
             "outputDir": str(output) if output else "",
@@ -194,7 +196,13 @@ class Session:
         )
         frame = None
         if self.layout.stamp_enabled:
-            frame = stamp_frame(slot.stamp_dx, slot.stamp_dy, self.layout.stamp, label)
+            frame = stamp_frame(
+                slot.stamp_dx,
+                slot.stamp_dy,
+                self.layout.stamp,
+                label,
+                fit_label=not template_has_number(self.layout.label_template),
+            )
         return {
             "number": editing.number,
             "slot": editing.slot_index,
@@ -400,7 +408,10 @@ class Session:
         slot_index = int(slot_index)
         _check_slot(card, slot_index)
         slots = list(card.slots)
-        slots[slot_index] = replace(slots[slot_index], title=str(title or ""))
+        slots[slot_index] = replace(
+            slots[slot_index],
+            title=self._title_from_field(card, slot_index, str(title or "")),
+        )
         self._put(_replace(card, slots=tuple(slots)))
         return self.view()
 
@@ -433,7 +444,19 @@ class Session:
         slot_index = int(slot_index)
         _check_slot(card, slot_index)
         require_stamp_font(self.layout.stamp, placing=True)
-        frame = stamp_frame(_point(dx), _point(dy), self.layout.stamp)
+        label = display_label(
+            self.layout.label_template,
+            self._shown(card.number),
+            slot_index,
+            len(card.slots),
+        )
+        frame = stamp_frame(
+            _point(dx),
+            _point(dy),
+            self.layout.stamp,
+            label,
+            fit_label=not template_has_number(self.layout.label_template),
+        )
         if frame is None:
             raise StampFontMissing("証拠番号の位置を決められません。")
         slots = list(card.slots)
@@ -845,6 +868,7 @@ class Session:
                     numbers=numbers,
                     page_number=label,
                     draw_stamp=stamp_enabled,
+                    fit_stamp=not template_has_number(template),
                 )
                 thumb = base64.b64encode(jpeg).decode("ascii")
             elif source_refs:
@@ -903,6 +927,7 @@ class Session:
             stamp_dx=job.stamp_dx,
             stamp_dy=job.stamp_dy,
             draw_stamp=(not bare) and layout.stamp_enabled,
+            fit_stamp=not template_has_number(layout.label_template),
             # 編集画面の黒は要素が描く。ここに焼くと、X で外した直後に下の画像が残る。
             masks=(),
             style=layout.stamp,
@@ -967,6 +992,18 @@ class Session:
         )
         return {"image": base64.b64encode(jpeg).decode("ascii")}
 
+    @_locked
+    def preview_generate(self) -> dict:
+        """書く前に、置き換え・削除・別名の一覧を返す。ファイルは変えない。"""
+        from .plan import jobs_from_layout
+        from .write import pending_writes
+
+        if self.folder is None:
+            return {"replace": [], "delete": [], "keep": []}
+        built = jobs_from_layout(self.layout, self.folder)
+        names = [job.filename for job in built.jobs]
+        return pending_writes(self.folder, names, self.layout.last_written, built.kept)
+
     def generate(self) -> dict:
         from .plan import jobs_from_layout
         from .stamp import StampFontMissing
@@ -992,6 +1029,7 @@ class Session:
                 style=style,
                 page_numbers=page_numbers,
                 stamp_enabled=layout.stamp_enabled,
+                fit_stamp=not template_has_number(layout.label_template),
             )
         except StampFontMissing as exc:
             return {"ok": False, **self.view(), "message": str(exc)}
@@ -1031,6 +1069,10 @@ class Session:
                 message = "保存するPDFがありません。"
             else:
                 message = f"{written}件を {folder / OUTPUT_DIR_NAME} に保存しました。"
+            if result.get("replaced"):
+                message += " 置き換えたファイル: " + "、".join(result["replaced"]) + "。"
+            if result.get("deleted"):
+                message += " 削除したファイル: " + "、".join(result["deleted"]) + "。"
             if built.warnings:
                 message = f"{message} " + " ".join(row["message"] for row in built.warnings)
             return {
@@ -1056,10 +1098,12 @@ class Session:
         slots = []
         for index, slot in enumerate(card.slots):
             included = index in choice.included
+            filename = choice.filename if choice.filename and (index == 0 or included) else self._slot_filename(card, index, book)
             slots.append({
                 "index": index,
                 "label": display_label(self.layout.label_template, shown, index, slot_count),
-                "filename": choice.filename if choice.filename and (index == 0 or included) else self._slot_filename(card, index, book),
+                "filename": filename,
+                "naturalName": book.natural_of(filename),
                 "title": slot.title,
                 "rotation": slot.rotation,
                 "outputNote": f"→ {choice.token} に含めて出力" if included else "",
@@ -1086,6 +1130,39 @@ class Session:
         if book.numbered or slot.files:
             return book.claim(self._shown(card.number), branch, title)
         return title_only_filename(title)
+
+    def _filename_book(self) -> FilenameBook:
+        from .write import foreign_output_names
+
+        blocked = set()
+        if self.folder is not None:
+            blocked = foreign_output_names(self.folder, self.layout.last_written)
+        return FilenameBook(self.layout.label_template, self.layout.stamp_enabled, blocked=blocked)
+
+    def _title_from_field(self, card: Card, slot_index: int, text: str) -> str:
+        book = self._filename_book()
+        filename, natural = self._output_names(card.number, slot_index, book)
+        return edited_title(text, filename, natural, numbered=book.numbered)
+
+    def _output_names(self, number: int, slot_index: int, book: FilenameBook) -> tuple[str, str]:
+        from .plan import file_merge_choice
+
+        for card in self.layout.cards:
+            slot_count = len(card.slots)
+            shown = self._shown(card.number)
+            choice = file_merge_choice(
+                self.layout.label_template,
+                card,
+                self.layout.merge_branches,
+                shown,
+                book=book,
+            )
+            for index, _slot in enumerate(card.slots):
+                included = index in choice.included
+                filename = choice.filename if choice.filename and (index == 0 or included) else self._slot_filename(card, index, book)
+                if card.number == number and index == slot_index:
+                    return filename, book.natural_of(filename)
+        return "", ""
 
     def _shown(self, ordinal: int) -> int:
         return shown_number(self.layout.first_number, ordinal)

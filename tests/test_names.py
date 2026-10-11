@@ -6,6 +6,7 @@ from lexcrew_pdf.names import (
     canonical_template,
     display_label,
     document_title,
+    FilenameBook,
     exhibit_number,
     filename_prefix,
     require_first_number,
@@ -14,6 +15,7 @@ from lexcrew_pdf.names import (
     sanitize_filename_title,
     stamp_label,
     strip_leading_exhibit_number,
+    edited_title,
     title_only_filename,
 )
 
@@ -204,3 +206,38 @@ def test_fallback_title_drops_a_leading_exhibit_number():
     assert document_title("", "甲001-1~3 書名.jpeg") == "書名"
     assert document_title("甲1 残す", "甲9 原本.jpg") == "甲1 残す"
     assert document_title("  ", None) == ""
+
+
+def test_windows_device_names_get_a_suffix_before_the_first_file():
+    assert title_only_filename("CON") == "CON (2).pdf"
+    assert title_only_filename("nul") == "nul (2).pdf"
+    assert title_only_filename("COM1") == "COM1 (2).pdf"
+    assert title_only_filename("甲001 CON") == "甲001 CON.pdf"
+    taken: set[str] = set()
+    assert title_only_filename("CON", taken) == "CON (2).pdf"
+    assert title_only_filename("CON", taken) == "CON (3).pdf"
+
+
+def test_filename_field_drops_only_the_suffix_this_app_added():
+    assert edited_title("契約書", "甲001 契約書.pdf", "甲001 契約書.pdf", numbered=True) == "契約書"
+    assert edited_title("", "甲001 証拠.pdf", "甲001 証拠.pdf", numbered=True) == ""
+    assert edited_title("覚書 (2).pdf", "覚書 (2).pdf", "覚書 (2).pdf", numbered=False) == "覚書 (2)"
+    assert edited_title("契約書 (2).pdf", "契約書 (2).pdf", "契約書.pdf", numbered=False) == "契約書"
+    assert edited_title("甲001 契約書 (2).pdf", "甲001 契約書 (2).pdf", "甲001 契約書.pdf", numbered=True) == "契約書"
+    assert edited_title("甲1 残す", "甲002 証拠.pdf", "甲002 証拠.pdf", numbered=True) == "甲1 残す"
+
+
+def test_blocked_names_are_kept_and_the_new_file_takes_the_next_number():
+    book = FilenameBook("甲", blocked={"甲001 契約書.pdf", "甲001 契約書 (2).pdf"})
+    assert book.claim(1, None, "契約書") == "甲001 契約書 (3).pdf"
+    assert book.kept == [
+        ("甲001 契約書.pdf", "甲001 契約書 (3).pdf"),
+        ("甲001 契約書 (2).pdf", "甲001 契約書 (3).pdf"),
+    ]
+    assert book.natural_of("甲001 契約書 (3).pdf") == "甲001 契約書.pdf"
+
+
+def test_a_pdf_name_that_differs_only_by_case_is_kept():
+    book = FilenameBook("別紙", blocked={"契約書.PDF"})
+    assert book.claim(1, None, "契約書") == "契約書 (2).pdf"
+    assert book.kept == [("契約書.PDF", "契約書 (2).pdf")]

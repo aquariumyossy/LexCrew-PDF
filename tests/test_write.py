@@ -376,8 +376,126 @@ def test_stamp_off_still_masks_and_numbers_pages_when_the_font_exists(tmp_path, 
         assert "SECRET" not in first
         assert "VISIBLE" in first
         assert "甲" not in first
-        assert "1 / 2" in first or "\x00" in first
-        assert "2 / 2" in second or "\x00" in second
+        assert "1 / 2" in first.replace("\xa0", " ")
+        assert "2 / 2" in second.replace("\xa0", " ")
+        assert "\x00" not in first
+        assert "\x00" not in second
         assert _red_rect(written[0]) == []
     finally:
         written.close()
+
+
+def test_a_file_this_app_did_not_write_is_not_replaced(tmp_path):
+    _require_font()
+    dest = tmp_path / "LexCrew-PDF-Downloads"
+    dest.mkdir()
+    foreign = dest / "甲001 契約書.pdf"
+    foreign.write_bytes(b"%PDF-foreign")
+    job = _job(tmp_path, "a.pdf", "甲第１号証", "甲001 契約書.pdf")
+    result = write_jobs(tmp_path, (job,), last_written=())
+    assert foreign.read_bytes() == b"%PDF-foreign"
+    assert result["written"] == []
+    assert result["errors"][0]["message"] == "同じ名前のファイルがあるため、書けませんでした。"
+    assert "甲001 契約書.pdf" in result["keep"]
+
+
+def test_a_foreign_pdf_with_different_case_is_not_replaced(tmp_path):
+    _require_font()
+    dest = tmp_path / "LexCrew-PDF-Downloads"
+    dest.mkdir()
+    foreign = dest / "甲001 契約書.PDF"
+    foreign.write_bytes(b"%PDF-foreign")
+    job = _job(tmp_path, "a.pdf", "甲第１号証", "甲001 契約書.pdf")
+    result = write_jobs(tmp_path, (job,), last_written=())
+    assert foreign.read_bytes() == b"%PDF-foreign"
+    assert result["written"] == []
+    assert not (dest / "甲001 契約書.pdf").exists() or (dest / "甲001 契約書.pdf").read_bytes() == b"%PDF-foreign"
+
+
+def test_the_previous_app_file_is_replaced_and_named(tmp_path):
+    _require_font()
+    job = _job(tmp_path, "a.pdf", "甲第１号証", "甲001 契約書.pdf", "NEW")
+    dest = tmp_path / "LexCrew-PDF-Downloads"
+    dest.mkdir()
+    (dest / "甲001 契約書.pdf").write_bytes(b"%PDF-old")
+    result = write_jobs(tmp_path, (job,), last_written=("甲001 契約書.pdf",))
+    assert result["replaced"] == ("甲001 契約書.pdf",)
+    assert (dest / "甲001 契約書.pdf").read_bytes() != b"%PDF-old"
+
+
+def test_foreign_pdf_stays_and_the_card_uses_the_next_name(tmp_path):
+    _require_font()
+    from lexcrew_pdf.session import Session
+
+    dest = tmp_path / "LexCrew-PDF-Downloads"
+    dest.mkdir()
+    numbered = dest / "甲001 契約書.pdf"
+    numbered.write_bytes(b"%PDF-numbered")
+    plain = dest / "契約書.pdf"
+    plain.write_bytes(b"%PDF-plain")
+    source = tmp_path / "a.pdf"
+    _pdf(source, "BODY")
+    session = Session(tmp_path)
+    session.add_file(1, 0, str(source))
+    session.set_title(1, "契約書", 0)
+    assert session.view()["cards"][0]["slots"][0]["filename"] == "甲001 契約書 (2).pdf"
+    preview = session.preview_generate()
+    assert preview["replace"] == []
+    assert preview["delete"] == []
+    assert preview["keep"] == [{"existing": "甲001 契約書.pdf", "writing": "甲001 契約書 (2).pdf"}]
+    result = session.generate()
+    assert result["ok"] is True
+    assert numbered.read_bytes() == b"%PDF-numbered"
+    assert (dest / "甲001 契約書 (2).pdf").is_file()
+    assert plain.read_bytes() == b"%PDF-plain"
+
+    session.set_stamp_enabled(False)
+    assert session.view()["cards"][0]["slots"][0]["filename"] == "契約書 (2).pdf"
+    result = session.generate()
+    assert result["ok"] is True
+    assert plain.read_bytes() == b"%PDF-plain"
+    assert (dest / "契約書 (2).pdf").is_file()
+    assert not (dest / "甲001 契約書 (2).pdf").exists()
+
+
+def test_generate_preview_names_replacement_and_deletion(tmp_path):
+    _require_font()
+    from lexcrew_pdf.session import Session
+
+    source = tmp_path / "a.pdf"
+    _pdf(source, "BODY")
+    session = Session(tmp_path)
+    session.add_file(1, 0, str(source))
+    session.set_title(1, "契約書", 0)
+    first = session.preview_generate()
+    assert first == {"replace": [], "delete": [], "keep": []}
+    session.generate()
+    session.set_title(1, "領収書", 0)
+    preview = session.preview_generate()
+    assert preview["replace"] == []
+    assert preview["delete"] == ["甲001 契約書.pdf"]
+    assert preview["keep"] == []
+    result = session.generate()
+    dest = tmp_path / "LexCrew-PDF-Downloads"
+    assert not (dest / "甲001 契約書.pdf").exists()
+    assert (dest / "甲001 領収書.pdf").is_file()
+    assert "削除したファイル: 甲001 契約書.pdf" in result["message"]
+    again = session.generate()
+    assert "置き換えたファイル: 甲001 領収書.pdf" in again["message"]
+
+
+def test_committing_the_filename_field_keeps_a_real_parenthesis(tmp_path):
+    from lexcrew_pdf.session import Session
+
+    source = tmp_path / "a.pdf"
+    _pdf(source, "BODY")
+    session = Session(tmp_path)
+    session.add_file(1, 0, str(source))
+    session.set_stamp_enabled(False)
+    session.set_title(1, "覚書 (2)", 0)
+    shown = session.view()["cards"][0]["slots"][0]["filename"]
+    assert shown == "覚書 (2).pdf"
+    session.set_title(1, shown, 0)
+    assert session.layout.cards[0].slots[0].title == "覚書 (2)"
+    session.set_title(1, "", 0)
+    assert session.layout.cards[0].slots[0].title == ""

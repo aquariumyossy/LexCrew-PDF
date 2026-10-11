@@ -373,7 +373,7 @@ def test_grayscale_is_omitted_when_off_and_kept_across_series(tmp_path, monkeypa
     assert session.layout.grayscale is True
     seen = {}
 
-    def fake_write(folder, jobs, *, last_written, preserve=(), grayscale=False, style=None, page_numbers=False, stamp_enabled=True):
+    def fake_write(folder, jobs, *, last_written, preserve=(), grayscale=False, style=None, page_numbers=False, stamp_enabled=True, fit_stamp=False):
         seen["grayscale"] = grayscale
         name = jobs[0].filename
         return {"written": [{"filename": name, "stampLabel": jobs[0].stamp}], "errors": [], "keep": (name,)}
@@ -436,7 +436,7 @@ def test_stamp_style_is_omitted_when_default_and_survives_series_changes(tmp_pat
     assert session.layout.grayscale is True
     seen = {}
 
-    def fake_write(folder, jobs, *, last_written, preserve=(), grayscale=False, style=None, page_numbers=False, stamp_enabled=True):
+    def fake_write(folder, jobs, *, last_written, preserve=(), grayscale=False, style=None, page_numbers=False, stamp_enabled=True, fit_stamp=False):
         seen["style"] = style
         name = jobs[0].filename
         return {"written": [{"filename": name, "stampLabel": jobs[0].stamp}], "errors": [], "keep": (name,)}
@@ -905,6 +905,87 @@ def test_generate_burns_a_mask_and_skips_a_missing_page(tmp_path):
         assert "甲第１号証" in text
     finally:
         produced.close()
+
+
+def test_a_long_plain_stamp_uses_the_same_width_after_drag_reload_and_pdf(tmp_path):
+    if not os.path.isfile(yu_mincho_path()):
+        pytest.skip("游明朝がありません")
+    import base64
+
+    from lexcrew_pdf.stamp import render_stamped_page_jpeg
+
+    source = tmp_path / "a.pdf"
+    _pdf(source, "BODY")
+    session = Session(tmp_path)
+    session.add_file(1, 0, str(source))
+    long_label = "証拠説明資料" * 4
+    session.set_series(long_label)
+    moved = session.set_stamp_offset(1, 0, -30, 20)
+    session.begin_edit(1, 0)
+    shown = session.edit_context()["stampFrame"]
+    assert shown["boxWidth"] == moved["stampFrame"]["boxWidth"]
+    assert shown["boxWidth"] > stamp_frame(0, 0)["boxWidth"]
+    reloaded = Session(tmp_path)
+    reloaded.begin_edit(1, 0)
+    again = reloaded.edit_context()["stampFrame"]
+    assert again["boxWidth"] == shown["boxWidth"]
+    assert (again["dx"], again["dy"]) == (shown["dx"], shown["dy"])
+    job = jobs_from_layout(reloaded.layout, tmp_path).jobs[0]
+    result = write_jobs(tmp_path, (job,), last_written=(), fit_stamp=True)
+    assert result["written"][0]["filename"] == job.filename
+    document = fitz.open(tmp_path / "LexCrew-PDF-Downloads" / job.filename)
+    try:
+        rect = _red_rect(document[0])
+        assert abs((rect.x1 - rect.x0) - again["boxWidth"]) < 0.2
+    finally:
+        document.close()
+    thumb = base64.b64decode(reloaded.media(1)["slots"][0]["thumb"])
+    sample = render_stamped_page_jpeg([str(source)], long_label, 0, zoom=0.48, fit_stamp=False)
+    grown = render_stamped_page_jpeg(
+        [str(source)], long_label, 0, zoom=0.48, stamp_dx=again["dx"], stamp_dy=again["dy"], fit_stamp=True,
+    )
+    assert _jpeg_red_width(thumb) == _jpeg_red_width(grown)
+    assert _jpeg_red_width(thumb) > _jpeg_red_width(sample)
+
+
+def test_a_numbered_stamp_keeps_the_sample_box_after_reload(tmp_path):
+    if not os.path.isfile(yu_mincho_path()):
+        pytest.skip("游明朝がありません")
+    source = tmp_path / "a.pdf"
+    _pdf(source, "BODY")
+    session = Session(tmp_path)
+    session.add_file(1, 0, str(source))
+    session.set_series("疎甲第N号証")
+    session.set_first_number(10)
+    session.add_branch(1)
+    saved = session.set_stamp_offset(1, 0, -40, 55)
+    assert saved["stampFrame"]["boxWidth"] == stamp_frame(0, 0)["boxWidth"]
+    reloaded = Session(tmp_path)
+    reloaded.begin_edit(1, 0)
+    frame = reloaded.edit_context()["stampFrame"]
+    assert frame["boxWidth"] == stamp_frame(0, 0)["boxWidth"]
+    assert (frame["dx"], frame["dy"]) == (saved["dx"], saved["dy"])
+
+
+def _jpeg_red_width(data: bytes) -> int:
+    document = fitz.open(stream=data, filetype="jpeg")
+    try:
+        pix = document[0].get_pixmap()
+        step = pix.n
+        samples = pix.samples
+        left = pix.width
+        right = -1
+        for y in range(pix.height):
+            row = y * pix.width * step
+            for x in range(pix.width):
+                index = row + x * step
+                red, green, blue = samples[index], samples[index + 1], samples[index + 2]
+                if red > 180 and red > green + 40 and red > blue + 40:
+                    left = min(left, x)
+                    right = max(right, x)
+        return 0 if right < 0 else right - left + 1
+    finally:
+        document.close()
 
 
 def _red_rect(page, missing=False):

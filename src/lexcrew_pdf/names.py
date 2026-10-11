@@ -243,38 +243,37 @@ def sanitize_filename_title(title: str) -> str:
     return "".join(kept).strip(" .")
 
 
+def plain_pdf_name(title: str) -> str:
+    """衝突を足す前の書名ファイル。空の書名は「証拠.pdf」。"""
+    suffix = ".pdf"
+    stem = _fit_filename_title(title, MAX_FILENAME_CHARS - len(suffix))
+    return f"{stem}{suffix}"
+
+
 def title_only_filename(title: str, taken: set[str] | None = None) -> str:
     """書名だけのファイル名。taken にあれば「書名 (2).pdf」。渡した集合へ足す。
 
     印を出さないときと、N の無い形のときに使う。空の書名は「証拠.pdf」。
+    CON.pdf のような Windows の装置名は、最初から「 (2)」を付ける。
     """
-    suffix = ".pdf"
-    stem = _fit_filename_title(title, MAX_FILENAME_CHARS - len(suffix))
-    candidate = f"{stem}{suffix}"
-    if taken is None or candidate not in taken:
-        if taken is not None:
-            taken.add(candidate)
-        return candidate
-    number = 2
-    while number <= 9999:
-        mark = f" ({number})"
-        budget = MAX_FILENAME_CHARS - len(suffix) - len(mark)
-        trimmed = _fit_filename_title(title, budget)
-        candidate = f"{trimmed}{mark}{suffix}"
-        if candidate not in taken and len(candidate) <= MAX_FILENAME_CHARS:
-            taken.add(candidate)
-            return candidate
-        number += 1
-    raise ValueError("同じ書名が多すぎます。")
+    return allocate_pdf_name(plain_pdf_name(title), taken)
 
 
 class FilenameBook:
     """1回の表示、または1回の生成で、ファイル名をカードの順に決める。"""
 
-    def __init__(self, template: str, stamp_enabled: bool = True) -> None:
+    def __init__(
+        self,
+        template: str,
+        stamp_enabled: bool = True,
+        blocked: set[str] | None = None,
+    ) -> None:
         self.template = canonical_template(template)
         self.numbered = exhibit_filenames_use_numbers(self.template, stamp_enabled=stamp_enabled)
-        self.taken: set[str] = set()
+        self.blocked = set(blocked or ())
+        self.taken: set[str] = set(self.blocked)
+        self.kept: list[tuple[str, str]] = []
+        self.naturals: dict[str, str] = {}
 
     def claim(
         self,
@@ -284,14 +283,125 @@ class FilenameBook:
         branch_end: int | None = None,
     ) -> str:
         if self.numbered:
-            return output_filename(self.template, shown, branch, title, branch_end=branch_end)
-        return title_only_filename(title, self.taken)
+            natural = output_filename(self.template, shown, branch, title, branch_end=branch_end)
+        else:
+            natural = plain_pdf_name(title)
+        chosen = allocate_pdf_name(natural, self.taken, self.blocked, self.kept)
+        self.naturals[chosen] = natural
+        return chosen
+
+    def natural_of(self, filename: str) -> str:
+        """衝突の接尾辞を足す前のファイル名。欄の書名へ戻すときに使う。"""
+        return self.naturals.get(filename, filename)
 
     def token(self, shown: int, branch: int | None, branch_end: int | None, filename: str) -> str:
         """「含めて出力」の印。番号があるときは甲001-1~3。無いときはファイル名そのもの。"""
         if self.numbered:
             return filename_stem_token(self.template, shown, branch, branch_end)
         return filename
+
+
+_WINDOWS_DEVICES = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{index}" for index in range(1, 10)}
+    | {f"LPT{index}" for index in range(1, 10)}
+)
+_COLLISION_SUFFIX = re.compile(r" \(\d+\)$")
+
+
+def allocate_pdf_name(
+    natural: str,
+    taken: set[str] | None = None,
+    blocked: set[str] | None = None,
+    kept: list[tuple[str, str]] | None = None,
+) -> str:
+    """natural が使えなければ「 (2)」から空いている名前を返す。taken へ足す。
+
+    blocked にある名前は残すファイル。そのときは kept に (残す名前, 書く名前) を足す。
+    """
+    blocked = blocked or set()
+    if not _pdf_name_taken(natural, taken):
+        if taken is not None:
+            taken.add(natural)
+        return natural
+    existing = _blocked_filename(natural, blocked)
+    skipped = [existing] if existing else []
+    number = 2
+    while number <= 9999:
+        candidate = _insert_filename_mark(natural, f" ({number})")
+        existing = _blocked_filename(candidate, blocked)
+        if existing:
+            skipped.append(existing)
+        if not _pdf_name_taken(candidate, taken) and len(candidate) <= MAX_FILENAME_CHARS:
+            if taken is not None:
+                taken.add(candidate)
+            if kept is not None:
+                for existing in skipped:
+                    kept.append((existing, candidate))
+            return candidate
+        number += 1
+    raise ValueError("同じ書名が多すぎます。")
+
+
+def edited_title(text: str, current_filename: str, natural_name: str, *, numbered: bool) -> str:
+    """ファイル名欄の文字列を、保存する書名に戻す。
+
+    割り当てが足した「 (2)」だけを外す。書名自体の「 (2)」は残す。
+    """
+    bare = _pdf_stem(text)
+    shown = _pdf_stem(current_filename)
+    natural = _pdf_stem(natural_name)
+    if natural and shown.startswith(natural):
+        suffix = shown[len(natural):]
+        if _COLLISION_SUFFIX.fullmatch(suffix) and bare.endswith(suffix) and len(bare) > len(suffix):
+            bare = bare[: -len(suffix)]
+    if numbered:
+        match = re.match(r"^[^\d]+\d{3}(?:-\d+(?:~\d+)?)?[ ：:](.+)$", bare)
+        if match:
+            return match.group(1)
+    return bare
+
+
+def _pdf_stem(name: str) -> str:
+    text = (name or "").strip()
+    if text.lower().endswith(".pdf"):
+        text = text[:-4]
+    return text.strip()
+
+
+def _pdf_name_taken(filename: str, taken: set[str] | None) -> bool:
+    if _is_windows_device(filename):
+        return True
+    if taken is None:
+        return False
+    return any(_same_pdf_name(filename, item) for item in taken)
+
+
+def _same_pdf_name(left: str, right: str) -> bool:
+    return left.casefold() == right.casefold()
+
+
+def _blocked_filename(filename: str, blocked: set[str]) -> str | None:
+    for item in blocked:
+        if _same_pdf_name(filename, item):
+            return item
+    return None
+
+
+def _is_windows_device(filename: str) -> bool:
+    return _pdf_stem(filename).upper() in _WINDOWS_DEVICES
+
+
+def _insert_filename_mark(natural: str, mark: str) -> str:
+    base = _pdf_stem(natural)
+    suffix = ".pdf"
+    budget = MAX_FILENAME_CHARS - len(suffix) - len(mark)
+    if budget < 1:
+        budget = 1
+    trimmed = base[:budget].strip(" .")
+    if not trimmed:
+        trimmed = "証拠"[:budget]
+    return f"{trimmed}{mark}{suffix}"
 
 
 def _require_numbered_template(series: str) -> str:

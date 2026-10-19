@@ -91,23 +91,25 @@
 - **WebView2** — システムの Edge WebView2 ランタイム
 - **游明朝** — `C:\Windows\Fonts\yumin.ttf`。初期の印に使う。無いときは、明朝のままでは PDF を書かず、前回のファイルも消しません
 - **游ゴシック** — `C:\Windows\Fonts\YuGothM.ttc`。ゴシックを選んだときに使う。無いときはその設定を保存せず、生成もしません
-- **配布物** — Python は zip に同梱します。相手の PC に Python は要りません
+- **配布物** — Python はセットアップに同梱します。相手の PC に Python は要りません
 
 ## インストール（利用者向け）
 
-1. 配布物の `LexCrew-PDF-1.3.0-win64.zip` を全部展開します。zip の中のファイルを直接開かないでください
-2. 展開したフォルダは、ドキュメントやデスクトップなど、書き込める場所に置きます。Program Files には置かないでください
-3. `LexCrew-PDF.bat` を一度実行します。デスクトップに朱色のアイコンが出て、アプリも開きます
-4. 次回からは、そのアイコンをクリックして起動します
-5. フォルダを移動したあとは、もう一度 `LexCrew-PDF.bat` を実行すると、アイコンのリンク先が新しい場所になります
+1. 配布物の `LexCrew-PDF-Setup-1.4.0.exe` を実行します。管理者権限は不要です。今サインインしているユーザーにだけ入ります
+2. インストール先は `%LOCALAPPDATA%\Programs\LexCrew-PDF` です。zip を展開して置く手順はありません
+3. スタートメニューに「LexCrew PDF」が入ります
+4. 完了画面の「デスクトップにショートカットを作る」と「今すぐ起動」は、最初からオンです。外すと、その操作はしません
+5. 次回からは、スタートメニューか、デスクトップにできたアイコンから起動します。閉じると終了します。常駐や、ログイン時の自動起動はありません
 
-止めるときは `停止.bat` を使います。
+更新は、新しいセットアップを実行するだけです。ダウンロードフォルダの「LexCrew-PDF-Downloads」にある証拠 PDF と、`layout.json` などの配置は残ります。
+
+アンインストールは、Windows の「設定」の「アプリ」から「LexCrew PDF」を選びます。アンインストールの前に、起動中のアプリは止まります。「LexCrew-PDF-Downloads」は消えません。
 
 証拠 PDF とカードの配置は、この PC のダウンロードフォルダの「LexCrew-PDF-Downloads」に保存されます。ダウンロードフォルダを別の場所へ移していても、Windows が示しているその場所を使います。
 
 ## 開発者向け
 
-このフォルダで開発します。配布物の `LexCrew-PDF.bat` とは別に、開発用の `起動.bat` と `停止.bat` があります。
+このフォルダで開発します。配布用のセットアップとは別に、開発用の `起動.bat` と `停止.bat` があります。
 
 `起動.bat` は、同じ仮想環境で既に動いているときはもう1つ開きません。`停止.bat` が止めるのは、このフォルダの `.venv` で動いている `lexcrew_pdf` だけです。起動ログの最初の行は `cards-ready` です。この行より前に PDF は開きません。
 
@@ -117,6 +119,7 @@
 - WebView2 ランタイム
 - 游明朝 `C:\Windows\Fonts\yumin.ttf`
 - ゴシックの印を使うときは游ゴシック `C:\Windows\Fonts\YuGothM.ttc`
+- セットアップを作るときは NSIS 3 の `makensis`
 
 ### コマンド
 
@@ -128,7 +131,7 @@ py -3 -m venv .venv
 powershell -ExecutionPolicy Bypass -File packaging\build.ps1
 ```
 
-`-e` を付けると、`python -m lexcrew_pdf` が `src` のコードを直接読みます。`packaging\build.ps1` は `dist\LexCrew-PDF-1.3.0-win64.zip` を作ります。初回は埋め込みの Python を取得するため、インターネットが必要です。
+`-e` を付けると、`python -m lexcrew_pdf` が `src` のコードを直接読みます。`packaging\build.ps1` は `dist\LexCrew-PDF-Setup-1.4.0.exe` と、開発用の `dist\LexCrew-PDF-1.4.0-win64.zip` を作ります。セットアップを作るには NSIS 3 の `makensis` が必要です。初回は埋め込みの Python を取得するため、インターネットが必要です。利用者に渡すのはセットアップだけです。zip は、展開したフォルダの `LexCrew-PDF.bat` で起動を見る開発用です。そのショートカットは、展開したフォルダを指します。zip の `停止.bat` は、その展開フォルダの `runtime` だけを止めます。
 
 ### 主なディレクトリ
 
@@ -144,7 +147,8 @@ powershell -ExecutionPolicy Bypass -File packaging\build.ps1
 | `src/lexcrew_pdf/stamp.py` | 原本を A4 縦へ載せ、出力の1ページ目、または各枝番の先頭ページだけ印を押す。画像はここで A4 の1ページにし、頁番号と文書情報の消去もここで行う |
 | `src/lexcrew_pdf/write.py` | `名前.pdf.writing` に書いてから置き換える |
 | `ui/` | カード画面とページ編集。ビルド工程は無い |
-| `packaging/build.ps1` | 配布用 zip を作る |
+| `packaging/build.ps1` | 配布用セットアップと、開発用 zip を作る |
+| `installer/setup.nsi` | 利用者向けセットアップ。インストール先、スタートメニュー、完了画面、アンインストール |
 
 `layout.json` に入れるものは、カード、書名、回転、分割、ファイルの場所、ページ順、前回書いたファイル名、初期値と違う印の色と大きさとフォント、印を外す設定、枝番を分けて出す設定、1以外の開始番号、頁番号の設定です。回転 0、分割オフ、原本順のページ、初期値の印、印を付ける初期値、枝番をまとめる初期値、開始番号1、頁番号の初期値（オフ、黒、8 ポイント、明朝、中央下、n/N）は省略します。印を外すときは `stampEnabled` を `false` にします。キーが無い古い配置は、印を付けるものとして読みます。枝番ごとに出すときは `mergeBranches` を `false` にします。開始番号は `firstNumber` です。頁番号を初期値から変えたときは `pageNumbers` に、付けるか、色、大きさ、フォント、位置、パターンを書きます。以前の `pageNumbers: true` は、付けるだけでほかは初期値として読みます。フォルダの中の原本は相対パス、外の原本は絶対パスです。以前の `filenameSeparator` は読み飛ばし、次の保存で消えます。
 
@@ -152,14 +156,14 @@ powershell -ExecutionPolicy Bypass -File packaging\build.ps1
 
 - 生成した PDF は、証拠番号を押して A4 に整えたファイルです。マスキングした範囲の文字と画像は戻せません。
 - 選んだ印のフォントが無いときは PDF を書かず、前回のファイルも消しません。
-- このリポジトリを手元で動かしただけでは、デスクトップの配布用アイコンは出ません。アイコンが要るときは `packaging\build.ps1` で作った zip を展開し、`LexCrew-PDF.bat` を実行してください。
+- このリポジトリを手元で動かしただけでは、デスクトップのショートカットは出ません。ショートカットが要るときは、セットアップを実行するか、開発用 zip を展開して `LexCrew-PDF.bat` を実行してください。
 
 ## ライセンス
 
-LexCrew-PDF のソースと配布 zip は、GNU AGPL 3.0 で提供します。Copyright (C) 2026 吉田秀平。全文は [LICENSE](LICENSE) です。
+LexCrew-PDF のソースと配布物は、GNU AGPL 3.0 で提供します。Copyright (C) 2026 吉田秀平。全文は [LICENSE](LICENSE) です。
 
-同梱の PyMuPDF は GNU AGPL 3.0 です。この配布物では改変していません。ソースは [PyMuPDF](https://github.com/pymupdf/PyMuPDF) の、zip に入っている版です。Artifex の商用ライセンスは含みません。
+同梱の PyMuPDF は GNU AGPL 3.0 です。この配布物では改変していません。ソースは [PyMuPDF](https://github.com/pymupdf/PyMuPDF) の、配布物に入っている版です。Artifex の商用ライセンスは含みません。
 
-pywebview は BSD 3-Clause License です。Copyright (c) 2014-2017, Roman Sirokov。原文は配布 zip の pywebview の dist-info にあります。
+pywebview は BSD 3-Clause License です。Copyright (c) 2014-2017, Roman Sirokov。原文は配布物の `runtime\Lib\site-packages` にある pywebview の dist-info にあります。
 
 開発: 弁護士　吉田秀平

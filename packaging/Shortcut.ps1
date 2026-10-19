@@ -1,7 +1,8 @@
 ﻿param(
     [Parameter(Mandatory = $true)][string]$AppRoot,
     [string]$LinkPath,
-    [switch]$Read
+    [switch]$Read,
+    [switch]$SkipUnblock
 )
 
 $ErrorActionPreference = "Stop"
@@ -127,7 +128,10 @@ if ($Read) {
 }
 
 $root = (Resolve-Path -LiteralPath $AppRoot).Path
-Get-ChildItem -LiteralPath $root -Recurse -File | Unblock-File
+# 展開した zip のゾーン識別子を外す。セットアップから呼ぶときは -SkipUnblock。
+if (-not $SkipUnblock) {
+    Get-ChildItem -LiteralPath $root -Recurse -File | Unblock-File
+}
 
 if (-not $LinkPath) {
     $shell = New-Object -ComObject WScript.Shell

@@ -8,7 +8,6 @@ $embedName = "python-3.13.14-embed-amd64.zip"
 $embedUrl = "https://www.python.org/ftp/python/3.13.14/$embedName"
 $embedHash = "90B4E5B9898B72D744650524BFF92377C367F44BD5FBD09E3148656C080AD907"
 $dest = Join-Path $repo "dist\LexCrew-PDF"
-$zipPath = Join-Path $repo "dist\LexCrew-PDF-1.3.0-win64.zip"
 
 function Get-Sha256 {
     param([string]$Path)
@@ -16,9 +15,12 @@ function Get-Sha256 {
 }
 
 $pyproject = Get-Content -LiteralPath (Join-Path $repo "pyproject.toml") -Raw -Encoding UTF8
-if ($pyproject -notmatch 'version = "1.3.0"') {
-    throw "版が 1.3.0 ではありません。"
+if ($pyproject -notmatch 'version = "([0-9]+\.[0-9]+\.[0-9]+)"') {
+    throw "版を読めません。"
 }
+$version = $Matches[1]
+$zipPath = Join-Path $repo "dist\LexCrew-PDF-$version-win64.zip"
+$setupPath = Join-Path $repo "dist\LexCrew-PDF-Setup-$version.exe"
 
 New-Item -ItemType Directory -Force -Path $cache | Out-Null
 $embed = Join-Path $cache $embedName
@@ -106,6 +108,7 @@ New-Item -ItemType Directory -Force -Path (Join-Path $dest "ui") | Out-Null
 Copy-Item -Path (Join-Path $repo "ui\*") -Destination (Join-Path $dest "ui")
 
 & (Join-Path $PSScriptRoot "New-LexCrewIcon.ps1") -SourcePng (Join-Path $PSScriptRoot "h-crew.png") -DestinationIco (Join-Path $dest "LexCrew-PDF.ico")
+# 次の3つは開発用 zip にだけ入る。セットアップは setup.nsi が同じ名前を除く。
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "LexCrew-PDF.bat") -Destination $dest
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "停止.bat") -Destination $dest
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "Shortcut.ps1") -Destination $dest
@@ -148,4 +151,47 @@ if (Test-Path -LiteralPath $zipPath) {
 )
 
 & (Join-Path $PSScriptRoot "smoke.ps1") -PackageRoot $dest -ZipPath $zipPath
+
+$makensis = $null
+$found = Get-Command makensis -ErrorAction SilentlyContinue
+if ($found) {
+    $makensis = $found.Source
+} else {
+    $candidates = @()
+    if ($env:ProgramFiles) {
+        $candidates += Join-Path $env:ProgramFiles "NSIS\makensis.exe"
+    }
+    if (${env:ProgramFiles(x86)}) {
+        $candidates += Join-Path ${env:ProgramFiles(x86)} "NSIS\makensis.exe"
+    }
+    if ($env:LOCALAPPDATA) {
+        $candidates += Join-Path $env:LOCALAPPDATA "tauri\NSIS\makensis.exe"
+    }
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate) {
+            $makensis = $candidate
+            break
+        }
+    }
+}
+if (-not $makensis) {
+    throw "makensis が見つかりません。NSIS 3 を PATH に入れるか、Program Files\NSIS にインストールしてください。"
+}
+if (Test-Path -LiteralPath $setupPath) {
+    Remove-Item -LiteralPath $setupPath -Force
+}
+$icon = Join-Path $dest "LexCrew-PDF.ico"
+$nsi = Join-Path $repo "installer\setup.nsi"
+& $makensis /INPUTCHARSET UTF8 `
+    "/DVERSION=$version" `
+    "/DOUTFILE=$($setupPath.Replace('\','/'))" `
+    "/DPAYLOAD=$($dest.Replace('\','/'))" `
+    "/DICON=$($icon.Replace('\','/'))" `
+    "/DSHORTCUT=$((Join-Path $PSScriptRoot 'Shortcut.ps1').Replace('\','/'))" `
+    "/DSTOP=$((Join-Path $repo 'installer\Stop-App.ps1').Replace('\','/'))" `
+    $nsi
+if ($LASTEXITCODE -ne 0) {
+    throw "makensis が失敗しました。"
+}
+Write-Output $setupPath
 Write-Output $zipPath

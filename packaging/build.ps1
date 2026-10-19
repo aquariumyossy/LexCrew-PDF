@@ -150,7 +150,23 @@ if (Test-Path -LiteralPath $zipPath) {
     $true
 )
 
+# smoke は __pycache__ を足す。zip を作った直後のファイルだけをセットアップに詰める。
+$packedFiles = New-Object "System.Collections.Generic.HashSet[string]" ([StringComparer]::OrdinalIgnoreCase)
+Get-ChildItem -LiteralPath $dest -Recurse -File | ForEach-Object { [void]$packedFiles.Add($_.FullName) }
+
 & (Join-Path $PSScriptRoot "smoke.ps1") -PackageRoot $dest -ZipPath $zipPath
+
+Get-ChildItem -LiteralPath $dest -Recurse -File | ForEach-Object {
+    if (-not $packedFiles.Contains($_.FullName)) {
+        Remove-Item -LiteralPath $_.FullName -Force
+    }
+}
+Get-ChildItem -LiteralPath $dest -Recurse -Directory | Sort-Object { $_.FullName.Length } -Descending | ForEach-Object {
+    if (-not (Get-ChildItem -LiteralPath $_.FullName -Force | Select-Object -First 1)) {
+        Remove-Item -LiteralPath $_.FullName -Force
+    }
+}
+Copy-Item -LiteralPath (Join-Path $repo "installer\使い方.txt") -Destination (Join-Path $dest "使い方.txt") -Force
 
 $makensis = $null
 $found = Get-Command makensis -ErrorAction SilentlyContinue
@@ -188,7 +204,6 @@ $nsi = Join-Path $repo "installer\setup.nsi"
     "/DPAYLOAD=$($dest.Replace('\','/'))" `
     "/DICON=$($icon.Replace('\','/'))" `
     "/DSHORTCUT=$((Join-Path $PSScriptRoot 'Shortcut.ps1').Replace('\','/'))" `
-    "/DSTOP=$((Join-Path $repo 'installer\Stop-App.ps1').Replace('\','/'))" `
     $nsi
 if ($LASTEXITCODE -ne 0) {
     throw "makensis が失敗しました。"

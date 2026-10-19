@@ -200,10 +200,10 @@ $icon = Join-Path $dest "LexCrew-PDF.ico"
 $nsi = Join-Path $repo "installer\setup.nsi"
 & $makensis /INPUTCHARSET UTF8 `
     "/DVERSION=$version" `
-    "/DOUTFILE=$($setupPath.Replace('\','/'))" `
-    "/DPAYLOAD=$($dest.Replace('\','/'))" `
-    "/DICON=$($icon.Replace('\','/'))" `
-    "/DSHORTCUT=$((Join-Path $PSScriptRoot 'Shortcut.ps1').Replace('\','/'))" `
+    "/DOUTFILE=$setupPath" `
+    "/DPAYLOAD=$dest" `
+    "/DICON=$icon" `
+    "/DSHORTCUT=$(Join-Path $PSScriptRoot 'Shortcut.ps1')" `
     $nsi
 if ($LASTEXITCODE -ne 0) {
     throw "makensis が失敗しました。"

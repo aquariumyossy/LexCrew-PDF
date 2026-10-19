@@ -58,6 +58,7 @@ def test_build_packs_the_tree_from_before_smoke():
     assert "LexCrew-PDF-Setup-$version.exe" in build
     assert "LexCrew-PDF-$version-win64.zip" in build
     assert "makensis" in build
+    assert ".Replace('\\','/')" not in build
     assert "LexCrew-PDF.bat" in build
     assert "停止.bat" in build
     assert "Stop-App.ps1" not in build

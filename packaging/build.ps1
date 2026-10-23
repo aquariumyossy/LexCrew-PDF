@@ -1,4 +1,5 @@
 ﻿$ErrorActionPreference = "Stop"
+$ErrorView = "NormalView"
 $ProgressPreference = "SilentlyContinue"
 $env:PYTHONNOUSERSITE = "1"
 
@@ -7,6 +8,14 @@ $cache = Join-Path $PSScriptRoot "cache"
 $embedName = "python-3.13.17-embed-amd64.zip"
 $embedUrl = "https://www.python.org/ftp/python/3.13.17/$embedName"
 $embedHash = "9E35319BFFEDAB8B36AD44D8F377CB4F1733BCEC257A0B6D04D94F01486DDB38"
+# pypa/get-pip のタグ 26.2.2（コミット fa4e90301bf000c36309f3ad79c3ac720b55d6df）。
+# このファイルは pip 26.2.2 を内包する。bootstrap.pypa.io/get-pip.py は同じバイトだが、次のリリースで替わる。
+$getPipUrl = "https://raw.githubusercontent.com/pypa/get-pip/fa4e90301bf000c36309f3ad79c3ac720b55d6df/public/get-pip.py"
+$getPipHash = "F4448A01E3AB2914C65F4CA59D4CACBA6B2DBDE19A483FBAC46587F8BBAFF424"
+$pymupdfVersion = "1.28.2"
+$pywebviewVersion = "6.2.1"
+$setuptoolsVersion = "84.2.1"
+$wheelVersion = "0.48.0"
 $dest = Join-Path $repo "dist\LexCrew-PDF"
 
 function Get-Sha256 {
@@ -38,8 +47,8 @@ if ($LASTEXITCODE -ne 0) {
 }
 $pymupdf = $versions[0].Trim()
 $pywebview = $versions[1].Trim()
-if ($pymupdf -ne "1.28.2" -or $pywebview -ne "6.2.1") {
-    throw "同梱する版が違います。PyMuPDF は 1.28.2、pywebview は 6.2.1 です。"
+if ($pymupdf -ne $pymupdfVersion -or $pywebview -ne $pywebviewVersion) {
+    throw "同梱する版が違います。入っているのは PyMuPDF $pymupdf、pywebview $pywebview です。PyMuPDF は $pymupdfVersion、pywebview は $pywebviewVersion です。.\.venv\Scripts\python.exe -m pip install -e . で直してください。"
 }
 
 if (Test-Path -LiteralPath $dest) {
@@ -66,18 +75,30 @@ $ascii = New-Object System.Text.UTF8Encoding $false
 [System.IO.File]::WriteAllLines($pth.FullName, $kept.ToArray(), $ascii)
 
 $python = Join-Path $runtime "python.exe"
-# get-pip.py は、実行したときにインデックスにある最新の pip を入れる。
-# スクリプトの古さでは版は決まらない。キャッシュは使わず、毎回取り直す。
-# 配布物に残る pip は、依存を入れたあと pip==26.2.2 で固定する。
+# タグの get-pip.py は、中に入っている pip を入れる。スクリプトの古さでは版は決まらない。
+# 無版の URL は使わない。キャッシュも使わず、毎回取り、SHA256 が違うファイルは実行しない。
+# 配布物に残る pip は、依存を入れたあと pip==26.2.2 で再度固定する。
 $getPip = Join-Path $cache "get-pip.py"
-Invoke-WebRequest -Uri "https://bootstrap.pypa.io/get-pip.py" -OutFile $getPip
+Invoke-WebRequest -Uri $getPipUrl -OutFile $getPip
+if ((Get-Sha256 $getPip) -ne $getPipHash) {
+    throw "get-pip.py のハッシュが一致しません。"
+}
 & $python $getPip --no-warn-script-location
 if ($LASTEXITCODE -ne 0) {
     throw "pip を入れられません。"
 }
-& $python -m pip install --disable-pip-version-check setuptools wheel
+& $python -m pip install --disable-pip-version-check "setuptools==$setuptoolsVersion" "wheel==$wheelVersion"
 if ($LASTEXITCODE -ne 0) {
     throw "ビルド用の部品を入れられません。"
+}
+$toolVersions = & $python -c "import importlib.metadata as m; print(m.version('setuptools')); print(m.version('wheel'))"
+if ($LASTEXITCODE -ne 0) {
+    throw "setuptools と wheel の版を読めません。"
+}
+$gotSetuptools = $toolVersions[0].Trim()
+$gotWheel = $toolVersions[1].Trim()
+if ($gotSetuptools -ne $setuptoolsVersion -or $gotWheel -ne $wheelVersion) {
+    throw "同梱する setuptools は $setuptoolsVersion、wheel は $wheelVersion です。入っているのは setuptools $gotSetuptools、wheel $gotWheel です。"
 }
 & $python -m pip install --disable-pip-version-check --no-build-isolation "pymupdf==$pymupdf" "pywebview==$pywebview"
 if ($LASTEXITCODE -ne 0) {

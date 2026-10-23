@@ -91,13 +91,17 @@ with log.open("a", encoding="utf-8") as handle:
     handle.write("PY " + " ".join(args) + "\\n")
 text = " ".join(args)
 if "importlib.metadata" in text:
+    if "setuptools" in text and "wheel" in text:
+        print(os.environ.get("LEXCREW_SETUPTOOLS", "84.2.1"))
+        print(os.environ.get("LEXCREW_WHEEL", "0.48.0"))
+        raise SystemExit(0)
     print(os.environ.get("LEXCREW_PYMUPDF", "1.28.2"))
     print(os.environ.get("LEXCREW_PYWEBVIEW", "6.2.1"))
     raise SystemExit(0)
 if "-m" in args and "pip" in args:
     if any(arg.startswith("pymupdf==") for arg in args):
         kind = "deps"
-    elif "setuptools" in args:
+    elif any(arg == "setuptools" or arg.startswith("setuptools==") for arg in args):
         kind = "tools"
     elif any(arg.startswith("pip==") or arg.startswith("pip>=") for arg in args):
         kind = "upgrade"
@@ -107,15 +111,16 @@ if "-m" in args and "pip" in args:
         handle.write("PIP " + kind + "\\n")
     if kind == "upgrade":
         code = int(os.environ.get("LEXCREW_PIP_EXIT", "0"))
-        if code == 0:
+        if code == 0 and os.environ.get("LEXCREW_VENDOR", "ok") != "missing":
             root = Path(sys.argv[0]).resolve().parent
             vendor = root / "Lib" / "site-packages" / "pip" / "_vendor"
             vendor.mkdir(parents=True, exist_ok=True)
-            certifi = os.environ.get("LEXCREW_CERTIFI", "2026.10.19")
-            (vendor / "vendor.txt").write_text(
-                "    certifi==" + certifi + "\\n",
-                encoding="utf-8",
-            )
+            if os.environ.get("LEXCREW_VENDOR") == "bad":
+                body = "certifi is bundled\\n"
+            else:
+                certifi = os.environ.get("LEXCREW_CERTIFI", "2026.10.19")
+                body = "    certifi==" + certifi + "\\n"
+            (vendor / "vendor.txt").write_text(body, encoding="utf-8")
         raise SystemExit(code)
     raise SystemExit(0)
 raise SystemExit(0)
@@ -123,12 +128,28 @@ raise SystemExit(0)
 
 _BUILD_WRAPPER = r"""
 $ErrorActionPreference = "Stop"
+$ErrorView = "NormalView"
 $PSNativeCommandUseErrorActionPreference = $false
 New-Item -ItemType File -Force -Path $env:LEXCREW_FAKE_LOG | Out-Null
 if ($env:LEXCREW_HASH_MODE -ne "real") {
     function Get-FileHash {
         param([string]$LiteralPath, [string]$Path, [string]$Algorithm)
-        [pscustomobject]@{ Hash = $env:LEXCREW_EMBED_HASH }
+        $target = if ($LiteralPath) { $LiteralPath } else { $Path }
+        if ($target -like "*get-pip.py") {
+            if ($env:LEXCREW_GETPIP_HASH_MODE -eq "real") {
+                $sha = [System.Security.Cryptography.SHA256]::Create()
+                $stream = [System.IO.File]::OpenRead($target)
+                try {
+                    $hash = $sha.ComputeHash($stream)
+                } finally {
+                    $stream.Dispose()
+                    $sha.Dispose()
+                }
+                return [pscustomobject]@{ Hash = ([System.BitConverter]::ToString($hash)).Replace("-", "") }
+            }
+            return [pscustomobject]@{ Hash = $env:LEXCREW_GETPIP_HASH }
+        }
+        return [pscustomobject]@{ Hash = $env:LEXCREW_EMBED_HASH }
     }
 }
 function Invoke-WebRequest {
@@ -155,6 +176,12 @@ def _embed_hash() -> str:
     return match.group(1)
 
 
+def _getpip_hash() -> str:
+    match = re.search(r'\$getPipHash = "([0-9A-F]+)"', _read(ROOT / "packaging" / "build.ps1"))
+    assert match is not None
+    return match.group(1)
+
+
 def _run_build(
     tmp: Path,
     *,
@@ -162,9 +189,16 @@ def _run_build(
     pywebview: str = "6.2.1",
     pip_exit: int = 0,
     certifi: str = "2026.10.19",
+    vendor: str = "ok",
+    setuptools: str = "84.2.1",
+    wheel: str = "0.48.0",
     real_hash: bool = False,
+    getpip_real_hash: bool = False,
     seed_get_pip: str | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], Path]:
+    # 偽の python.exe はシバン付きスクリプトで、ラッパーは chmod する。Windows では動かない。
+    if os.name == "nt":
+        pytest.skip("偽の python.exe は Unix でしか実行できない")
     if shutil.which("pwsh") is None:
         pytest.skip("pwsh がありません")
     sandbox = tmp / "repo"
@@ -198,8 +232,13 @@ def _run_build(
             "LEXCREW_PYWEBVIEW": pywebview,
             "LEXCREW_PIP_EXIT": str(pip_exit),
             "LEXCREW_CERTIFI": certifi,
+            "LEXCREW_VENDOR": vendor,
+            "LEXCREW_SETUPTOOLS": setuptools,
+            "LEXCREW_WHEEL": wheel,
             "LEXCREW_HASH_MODE": "real" if real_hash else "mock",
+            "LEXCREW_GETPIP_HASH_MODE": "real" if getpip_real_hash else "mock",
             "LEXCREW_EMBED_HASH": _embed_hash(),
+            "LEXCREW_GETPIP_HASH": _getpip_hash(),
         }
     )
     proc = subprocess.run(
@@ -229,6 +268,12 @@ def test_build_pins_runtime_and_refreshes_get_pip(tmp_path: Path):
     assert (sandbox / "packaging" / "cache" / "get-pip.py").read_text(encoding="utf-8") == "FRESH"
     log = _build_log(sandbox)
     assert "pip==26.2.2" in log
+    assert "setuptools==84.2.1" in log
+    assert "wheel==0.48.0" in log
+    assert (
+        "https://raw.githubusercontent.com/pypa/get-pip/fa4e90301bf000c36309f3ad79c3ac720b55d6df/public/get-pip.py"
+        in log
+    )
     assert log.index("PIP tools") < log.index("PIP deps") < log.index("PIP upgrade")
 
 
@@ -252,6 +297,20 @@ def test_build_accepts_newer_vendored_certifi(tmp_path: Path):
     assert _sitecustomize(sandbox).is_file(), proc.stderr
 
 
+def test_build_stops_when_vendor_txt_is_missing(tmp_path: Path):
+    proc, sandbox = _run_build(tmp_path, vendor="missing")
+    assert proc.returncode != 0
+    assert "pip の certifi を確認できません。" in proc.stderr
+    assert not _sitecustomize(sandbox).exists()
+
+
+def test_build_stops_when_certifi_line_is_unreadable(tmp_path: Path):
+    proc, sandbox = _run_build(tmp_path, vendor="bad")
+    assert proc.returncode != 0
+    assert "pip の certifi を確認できません。" in proc.stderr
+    assert not _sitecustomize(sandbox).exists()
+
+
 def test_build_stops_when_embed_hash_mismatches(tmp_path: Path):
     proc, sandbox = _run_build(tmp_path, real_hash=True)
     assert proc.returncode != 0
@@ -266,7 +325,31 @@ def test_build_stops_when_embed_hash_mismatches(tmp_path: Path):
 def test_build_stops_when_bundled_versions_differ(tmp_path: Path, pymupdf: str, pywebview: str):
     proc, sandbox = _run_build(tmp_path, pymupdf=pymupdf, pywebview=pywebview)
     assert proc.returncode != 0
-    assert "同梱する版が違います。PyMuPDF は 1.28.2、pywebview は 6.2.1 です。" in proc.stderr
+    assert f"PyMuPDF {pymupdf}" in proc.stderr
+    assert f"pywebview {pywebview}" in proc.stderr
+    assert "PyMuPDF は 1.28.2、pywebview は 6.2.1 です。" in proc.stderr
+    assert "pip install -e ." in proc.stderr
+    assert not _sitecustomize(sandbox).exists()
+
+
+def test_build_stops_when_get_pip_hash_mismatches(tmp_path: Path):
+    proc, sandbox = _run_build(tmp_path, getpip_real_hash=True)
+    assert proc.returncode != 0
+    assert "get-pip.py のハッシュが一致しません。" in proc.stderr
+    assert not _sitecustomize(sandbox).exists()
+
+
+@pytest.mark.parametrize(
+    ("setuptools", "wheel"),
+    [("83.0.0", "0.48.0"), ("84.2.1", "0.47.0")],
+)
+def test_build_stops_when_setuptools_or_wheel_differs(
+    tmp_path: Path, setuptools: str, wheel: str
+):
+    proc, sandbox = _run_build(tmp_path, setuptools=setuptools, wheel=wheel)
+    assert proc.returncode != 0
+    assert f"setuptools {setuptools}" in proc.stderr
+    assert f"wheel {wheel}" in proc.stderr
     assert not _sitecustomize(sandbox).exists()
 
 

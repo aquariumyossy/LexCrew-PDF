@@ -41,8 +41,8 @@ def _function(code: str, name: str) -> str:
     return rest[: rest.index("\nFunctionEnd")]
 
 
-def test_version_is_1_4_0():
-    assert 'version = "1.4.0"' in _read(ROOT / "pyproject.toml")
+def test_version_is_1_4_1():
+    assert 'version = "1.4.1"' in _read(ROOT / "pyproject.toml")
 
 
 def test_dev_launchers_stay():
@@ -57,6 +57,15 @@ def test_build_packs_the_tree_from_before_smoke():
     build = _read(ROOT / "packaging" / "build.ps1")
     assert "LexCrew-PDF-Setup-$version.exe" in build
     assert "LexCrew-PDF-$version-win64.zip" in build
+    assert "python-3.13.17-embed-amd64.zip" in build
+    assert "https://www.python.org/ftp/python/3.13.17/" in build
+    assert "9E35319BFFEDAB8B36AD44D8F377CB4F1733BCEC257A0B6D04D94F01486DDB38" in build
+    assert "python-3.13.14" not in build
+    assert "Test-Path -LiteralPath $getPip" not in build
+    assert 'Invoke-WebRequest -Uri "https://bootstrap.pypa.io/get-pip.py" -OutFile $getPip' in build
+    assert "--upgrade pip" in build
+    assert "--upgrade certifi" in build
+    assert "certifi の有無を確認できません。" in build
     assert "makensis" in build
     assert ".Replace('\\','/')" not in build
     assert "LexCrew-PDF.bat" in build
@@ -188,7 +197,7 @@ def test_user_docs_split_zip_and_setup():
     zip_guide = _read(ROOT / "packaging" / "使い方.txt")
     setup_guide = _read(ROOT / "installer" / "使い方.txt")
     for text in (readme, setup_guide):
-        assert "LexCrew-PDF-Setup-1.4.0.exe" in text
+        assert "LexCrew-PDF-Setup-1.4.1.exe" in text
         assert "Programs\\LexCrew-PDF" in text
         assert "LexCrew PDF" in text
         assert "デスクトップにショートカットを作る" in text
@@ -209,7 +218,7 @@ def test_user_docs_split_zip_and_setup():
     assert "PC が保護されました" not in zip_guide
     assert "デスクトップにショートカットを作る" not in zip_guide
     assert "開発用" in readme
-    assert "LexCrew-PDF-1.4.0-win64.zip" in readme
+    assert "LexCrew-PDF-1.4.1-win64.zip" in readme
     for text in (zip_guide, setup_guide):
         assert "甲第N号証" in text
         assert "スタンプ" in text
@@ -249,13 +258,13 @@ def test_setup_compiles_with_makensis():
         (payload / "LICENSE").write_text("license\n", encoding="utf-8")
         (payload / "LexCrew-PDF.bat").write_text("bat\n", encoding="utf-8")
         (payload / "LexCrew-PDF.ico").write_bytes(_tiny_ico())
-        outfile = Path(tmp) / "LexCrew-PDF-Setup-1.4.0.exe"
+        outfile = Path(tmp) / "LexCrew-PDF-Setup-1.4.1.exe"
         cmd = [
             "makensis",
             "-WX",
             "-INPUTCHARSET",
             "UTF8",
-            "-DVERSION=1.4.0",
+            "-DVERSION=1.4.1",
             f"-DOUTFILE={outfile}",
             f"-DPAYLOAD={payload}",
             f"-DICON={payload / 'LexCrew-PDF.ico'}",
@@ -332,14 +341,14 @@ def test_wine_install_keeps_unrelated_files_and_user_notes():
         (payload / "LICENSE").write_text("license\n", encoding="utf-8")
         (payload / "LexCrew-PDF.bat").write_text("do-not-ship\n", encoding="utf-8")
         (payload / "LexCrew-PDF.ico").write_bytes(_tiny_ico())
-        setup = prefix / "LexCrew-PDF-Setup-1.4.0.exe"
+        setup = prefix / "LexCrew-PDF-Setup-1.4.1.exe"
         compiled = _run(
             [
                 "makensis",
                 "-WX",
                 "-INPUTCHARSET",
                 "UTF8",
-                "-DVERSION=1.4.0",
+                "-DVERSION=1.4.1",
                 f"-DOUTFILE={setup}",
                 f"-DPAYLOAD={payload}",
                 f"-DICON={payload / 'LexCrew-PDF.ico'}",

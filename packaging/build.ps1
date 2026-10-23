@@ -4,9 +4,9 @@ $env:PYTHONNOUSERSITE = "1"
 
 $repo = Split-Path -Parent $PSScriptRoot
 $cache = Join-Path $PSScriptRoot "cache"
-$embedName = "python-3.13.14-embed-amd64.zip"
-$embedUrl = "https://www.python.org/ftp/python/3.13.14/$embedName"
-$embedHash = "90B4E5B9898B72D744650524BFF92377C367F44BD5FBD09E3148656C080AD907"
+$embedName = "python-3.13.17-embed-amd64.zip"
+$embedUrl = "https://www.python.org/ftp/python/3.13.17/$embedName"
+$embedHash = "9E35319BFFEDAB8B36AD44D8F377CB4F1733BCEC257A0B6D04D94F01486DDB38"
 $dest = Join-Path $repo "dist\LexCrew-PDF"
 
 function Get-Sha256 {
@@ -63,10 +63,10 @@ $ascii = New-Object System.Text.UTF8Encoding $false
 [System.IO.File]::WriteAllLines($pth.FullName, $kept.ToArray(), $ascii)
 
 $python = Join-Path $runtime "python.exe"
+# 2026-10-20 より前の get-pip.py は pip 26.2.2 未満を入れる。
+# キャッシュは使わず、ビルドのたびに取り直す。
 $getPip = Join-Path $cache "get-pip.py"
-if (-not (Test-Path -LiteralPath $getPip)) {
-    Invoke-WebRequest -Uri "https://bootstrap.pypa.io/get-pip.py" -OutFile $getPip
-}
+Invoke-WebRequest -Uri "https://bootstrap.pypa.io/get-pip.py" -OutFile $getPip
 & $python $getPip --no-warn-script-location
 if ($LASTEXITCODE -ne 0) {
     throw "pip を入れられません。"
@@ -78,6 +78,22 @@ if ($LASTEXITCODE -ne 0) {
 & $python -m pip install --disable-pip-version-check --no-build-isolation "pymupdf==$pymupdf" "pywebview==$pywebview"
 if ($LASTEXITCODE -ne 0) {
     throw "依存を入れられません。"
+}
+# セットアップと開発用 zip は runtime をそのまま詰めるので pip は残る。
+# certifi は pip に同梱される。残った pip を最新にし、同梱分も上げる。
+& $python -m pip install --disable-pip-version-check --upgrade pip
+if ($LASTEXITCODE -ne 0) {
+    throw "pip を更新できません。"
+}
+$certifi = & $python -c "import importlib.metadata as m; print('yes' if any(d.metadata['Name'].lower()=='certifi' for d in m.distributions()) else 'no')"
+if ($LASTEXITCODE -ne 0) {
+    throw "certifi の有無を確認できません。"
+}
+if ($certifi.Trim() -eq "yes") {
+    & $python -m pip install --disable-pip-version-check --upgrade certifi
+    if ($LASTEXITCODE -ne 0) {
+        throw "certifi を更新できません。"
+    }
 }
 $siteCustom = @"
 import site

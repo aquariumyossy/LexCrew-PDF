@@ -38,6 +38,9 @@ if ($LASTEXITCODE -ne 0) {
 }
 $pymupdf = $versions[0].Trim()
 $pywebview = $versions[1].Trim()
+if ($pymupdf -ne "1.28.2" -or $pywebview -ne "6.2.1") {
+    throw "同梱する版が違います。PyMuPDF は 1.28.2、pywebview は 6.2.1 です。"
+}
 
 if (Test-Path -LiteralPath $dest) {
     Remove-Item -LiteralPath $dest -Recurse -Force
@@ -63,8 +66,9 @@ $ascii = New-Object System.Text.UTF8Encoding $false
 [System.IO.File]::WriteAllLines($pth.FullName, $kept.ToArray(), $ascii)
 
 $python = Join-Path $runtime "python.exe"
-# 2026-10-20 より前の get-pip.py は pip 26.2.2 未満を入れる。
-# キャッシュは使わず、ビルドのたびに取り直す。
+# get-pip.py は、実行したときにインデックスにある最新の pip を入れる。
+# スクリプトの古さでは版は決まらない。キャッシュは使わず、毎回取り直す。
+# 配布物に残る pip は、依存を入れたあと pip==26.2.2 で固定する。
 $getPip = Join-Path $cache "get-pip.py"
 Invoke-WebRequest -Uri "https://bootstrap.pypa.io/get-pip.py" -OutFile $getPip
 & $python $getPip --no-warn-script-location
@@ -80,20 +84,22 @@ if ($LASTEXITCODE -ne 0) {
     throw "依存を入れられません。"
 }
 # セットアップと開発用 zip は runtime をそのまま詰めるので pip は残る。
-# certifi は pip に同梱される。残った pip を最新にし、同梱分も上げる。
-& $python -m pip install --disable-pip-version-check --upgrade pip
+# 素の --upgrade pip は、インデックスに届かないときや古いミラーでも終了コード 0 になる。
+# pip==26.2.2 を満たせないときは失敗させる。certifi は pip に同梱される。
+& $python -m pip install --disable-pip-version-check --upgrade "pip==26.2.2"
 if ($LASTEXITCODE -ne 0) {
     throw "pip を更新できません。"
 }
-$certifi = & $python -c "import importlib.metadata as m; print('yes' if any(d.metadata['Name'].lower()=='certifi' for d in m.distributions()) else 'no')"
-if ($LASTEXITCODE -ne 0) {
-    throw "certifi の有無を確認できません。"
+$vendorTxt = Join-Path $runtime "Lib\site-packages\pip\_vendor\vendor.txt"
+if (-not (Test-Path -LiteralPath $vendorTxt)) {
+    throw "pip の certifi を確認できません。"
 }
-if ($certifi.Trim() -eq "yes") {
-    & $python -m pip install --disable-pip-version-check --upgrade certifi
-    if ($LASTEXITCODE -ne 0) {
-        throw "certifi を更新できません。"
-    }
+$vendorBody = Get-Content -LiteralPath $vendorTxt -Raw
+if ($vendorBody -notmatch '(?m)^\s*certifi==(\d+\.\d+\.\d+)\s*$') {
+    throw "pip の certifi を確認できません。"
+}
+if ([version]$Matches[1] -lt [version]"2026.10.19") {
+    throw "pip の certifi が 2026.10.19 未満です。"
 }
 $siteCustom = @"
 import site

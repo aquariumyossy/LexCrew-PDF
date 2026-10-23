@@ -42,7 +42,10 @@ def _function(code: str, name: str) -> str:
 
 
 def test_version_is_1_4_1():
-    assert 'version = "1.4.1"' in _read(ROOT / "pyproject.toml")
+    project = _read(ROOT / "pyproject.toml")
+    assert 'version = "1.4.1"' in project
+    assert '"pymupdf==1.28.2"' in project
+    assert '"pywebview==6.2.1"' in project
 
 
 def test_dev_launchers_stay():
@@ -61,11 +64,6 @@ def test_build_packs_the_tree_from_before_smoke():
     assert "https://www.python.org/ftp/python/3.13.17/" in build
     assert "9E35319BFFEDAB8B36AD44D8F377CB4F1733BCEC257A0B6D04D94F01486DDB38" in build
     assert "python-3.13.14" not in build
-    assert "Test-Path -LiteralPath $getPip" not in build
-    assert 'Invoke-WebRequest -Uri "https://bootstrap.pypa.io/get-pip.py" -OutFile $getPip' in build
-    assert "--upgrade pip" in build
-    assert "--upgrade certifi" in build
-    assert "certifi の有無を確認できません。" in build
     assert "makensis" in build
     assert ".Replace('\\','/')" not in build
     assert "LexCrew-PDF.bat" in build
@@ -80,6 +78,196 @@ def test_build_packs_the_tree_from_before_smoke():
     usage = build.index("installer\\使い方.txt")
     assert smoke < usage
     assert usage < build.index("& $makensis")
+
+
+_FAKE_PYTHON = """#!/usr/bin/env python3
+import os
+import sys
+from pathlib import Path
+
+log = Path(os.environ["LEXCREW_FAKE_LOG"])
+args = sys.argv[1:]
+with log.open("a", encoding="utf-8") as handle:
+    handle.write("PY " + " ".join(args) + "\\n")
+text = " ".join(args)
+if "importlib.metadata" in text:
+    print(os.environ.get("LEXCREW_PYMUPDF", "1.28.2"))
+    print(os.environ.get("LEXCREW_PYWEBVIEW", "6.2.1"))
+    raise SystemExit(0)
+if "-m" in args and "pip" in args:
+    if any(arg.startswith("pymupdf==") for arg in args):
+        kind = "deps"
+    elif "setuptools" in args:
+        kind = "tools"
+    elif any(arg.startswith("pip==") or arg.startswith("pip>=") for arg in args):
+        kind = "upgrade"
+    else:
+        kind = "other"
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write("PIP " + kind + "\\n")
+    if kind == "upgrade":
+        code = int(os.environ.get("LEXCREW_PIP_EXIT", "0"))
+        if code == 0:
+            root = Path(sys.argv[0]).resolve().parent
+            vendor = root / "Lib" / "site-packages" / "pip" / "_vendor"
+            vendor.mkdir(parents=True, exist_ok=True)
+            certifi = os.environ.get("LEXCREW_CERTIFI", "2026.10.19")
+            (vendor / "vendor.txt").write_text(
+                "    certifi==" + certifi + "\\n",
+                encoding="utf-8",
+            )
+        raise SystemExit(code)
+    raise SystemExit(0)
+raise SystemExit(0)
+"""
+
+_BUILD_WRAPPER = r"""
+$ErrorActionPreference = "Stop"
+$PSNativeCommandUseErrorActionPreference = $false
+New-Item -ItemType File -Force -Path $env:LEXCREW_FAKE_LOG | Out-Null
+if ($env:LEXCREW_HASH_MODE -ne "real") {
+    function Get-FileHash {
+        param([string]$LiteralPath, [string]$Path, [string]$Algorithm)
+        [pscustomobject]@{ Hash = $env:LEXCREW_EMBED_HASH }
+    }
+}
+function Invoke-WebRequest {
+    param([string]$Uri, [string]$OutFile)
+    [System.IO.File]::AppendAllText($env:LEXCREW_FAKE_LOG, "WEB $Uri`n")
+    $text = if ($Uri -like "*get-pip.py") { "FRESH" } else { "NOT-A-ZIP" }
+    [System.IO.File]::WriteAllText($OutFile, $text)
+}
+function Expand-Archive {
+    param([string]$LiteralPath, [string]$DestinationPath, [switch]$Force)
+    New-Item -ItemType Directory -Force -Path $DestinationPath | Out-Null
+    Set-Content -LiteralPath (Join-Path $DestinationPath "python313._pth") -Value "python313.zip" -Encoding ascii
+    $exe = Join-Path $DestinationPath "python.exe"
+    Copy-Item -LiteralPath $env:LEXCREW_FAKE_PYTHON -Destination $exe
+    & chmod +x $exe
+}
+& $env:LEXCREW_BUILD_SCRIPT
+"""
+
+
+def _embed_hash() -> str:
+    match = re.search(r'\$embedHash = "([0-9A-F]+)"', _read(ROOT / "packaging" / "build.ps1"))
+    assert match is not None
+    return match.group(1)
+
+
+def _run_build(
+    tmp: Path,
+    *,
+    pymupdf: str = "1.28.2",
+    pywebview: str = "6.2.1",
+    pip_exit: int = 0,
+    certifi: str = "2026.10.19",
+    real_hash: bool = False,
+    seed_get_pip: str | None = None,
+) -> tuple[subprocess.CompletedProcess[str], Path]:
+    if shutil.which("pwsh") is None:
+        pytest.skip("pwsh がありません")
+    sandbox = tmp / "repo"
+    packaging = sandbox / "packaging"
+    packaging.mkdir(parents=True)
+    script = packaging / "build.ps1"
+    shutil.copy(ROOT / "packaging" / "build.ps1", script)
+    (sandbox / "pyproject.toml").write_text('version = "1.4.1"\n', encoding="utf-8")
+    fake = sandbox / ".venv" / "Scripts" / "python.exe"
+    fake.parent.mkdir(parents=True)
+    fake.write_text(_FAKE_PYTHON, encoding="utf-8")
+    fake.chmod(0o755)
+    if seed_get_pip is not None:
+        cache = packaging / "cache"
+        cache.mkdir()
+        (cache / "get-pip.py").write_text(seed_get_pip, encoding="utf-8")
+    if real_hash:
+        cache = packaging / "cache"
+        cache.mkdir(exist_ok=True)
+        (cache / "python-3.13.17-embed-amd64.zip").write_bytes(b"not-the-embed-zip")
+    log = sandbox / "fake.log"
+    wrapper = sandbox / "wrap.ps1"
+    wrapper.write_text(_BUILD_WRAPPER, encoding="utf-8")
+    env = os.environ.copy()
+    env.update(
+        {
+            "LEXCREW_FAKE_LOG": str(log),
+            "LEXCREW_FAKE_PYTHON": str(fake),
+            "LEXCREW_BUILD_SCRIPT": str(script),
+            "LEXCREW_PYMUPDF": pymupdf,
+            "LEXCREW_PYWEBVIEW": pywebview,
+            "LEXCREW_PIP_EXIT": str(pip_exit),
+            "LEXCREW_CERTIFI": certifi,
+            "LEXCREW_HASH_MODE": "real" if real_hash else "mock",
+            "LEXCREW_EMBED_HASH": _embed_hash(),
+        }
+    )
+    proc = subprocess.run(
+        ["pwsh", "-NoProfile", "-File", str(wrapper)],
+        cwd=sandbox,
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+    )
+    return proc, sandbox
+
+
+def _sitecustomize(sandbox: Path) -> Path:
+    return sandbox / "dist" / "LexCrew-PDF" / "runtime" / "Lib" / "site-packages" / "sitecustomize.py"
+
+
+def _build_log(sandbox: Path) -> str:
+    return (sandbox / "fake.log").read_text(encoding="utf-8")
+
+
+def test_build_pins_runtime_and_refreshes_get_pip(tmp_path: Path):
+    proc, sandbox = _run_build(tmp_path, seed_get_pip="STALE")
+    assert _sitecustomize(sandbox).is_file(), proc.stderr
+    assert (sandbox / "packaging" / "cache" / "get-pip.py").read_text(encoding="utf-8") == "FRESH"
+    log = _build_log(sandbox)
+    assert "pip==26.2.2" in log
+    assert log.index("PIP tools") < log.index("PIP deps") < log.index("PIP upgrade")
+
+
+def test_build_stops_when_pip_upgrade_fails(tmp_path: Path):
+    proc, sandbox = _run_build(tmp_path, pip_exit=1)
+    assert proc.returncode != 0
+    assert "pip を更新できません。" in proc.stderr
+    assert not _sitecustomize(sandbox).exists()
+
+
+@pytest.mark.parametrize("certifi", ["2026.6.17", "2026.10.18"])
+def test_build_stops_when_vendored_certifi_is_old(tmp_path: Path, certifi: str):
+    proc, sandbox = _run_build(tmp_path, certifi=certifi)
+    assert proc.returncode != 0
+    assert "pip の certifi が 2026.10.19 未満です。" in proc.stderr
+    assert not _sitecustomize(sandbox).exists()
+
+
+def test_build_accepts_newer_vendored_certifi(tmp_path: Path):
+    proc, sandbox = _run_build(tmp_path, certifi="2026.11.1")
+    assert _sitecustomize(sandbox).is_file(), proc.stderr
+
+
+def test_build_stops_when_embed_hash_mismatches(tmp_path: Path):
+    proc, sandbox = _run_build(tmp_path, real_hash=True)
+    assert proc.returncode != 0
+    assert "埋め込み Python のハッシュが一致しません。" in proc.stderr
+    assert not _sitecustomize(sandbox).exists()
+
+
+@pytest.mark.parametrize(
+    ("pymupdf", "pywebview"),
+    [("2.0", "6.2.1"), ("1.28.2", "6.3")],
+)
+def test_build_stops_when_bundled_versions_differ(tmp_path: Path, pymupdf: str, pywebview: str):
+    proc, sandbox = _run_build(tmp_path, pymupdf=pymupdf, pywebview=pywebview)
+    assert proc.returncode != 0
+    assert "同梱する版が違います。PyMuPDF は 1.28.2、pywebview は 6.2.1 です。" in proc.stderr
+    assert not _sitecustomize(sandbox).exists()
 
 
 def test_installer_deletes_only_its_own_payload():

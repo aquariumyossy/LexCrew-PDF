@@ -610,6 +610,8 @@ function confirmGenerate(preview) {
   const remove = (preview && preview.delete) || [];
   const keep = (preview && preview.keep) || [];
   if (!replace.length && !remove.length && !keep.length) return true;
+  const writing = (preview && preview.writing) || [];
+  const fresh = writing.filter((name) => !replace.includes(name));
   const lines = [];
   if (replace.length) {
     lines.push("次のファイルを置き換えます。");
@@ -618,6 +620,10 @@ function confirmGenerate(preview) {
   if (remove.length) {
     lines.push("次のファイルを削除します。");
     remove.forEach((name) => lines.push(name));
+  }
+  if (fresh.length) {
+    lines.push("次のファイルを書きます。");
+    fresh.forEach((name) => lines.push(name));
   }
   if (keep.length) {
     lines.push("次のファイルは残し、別名で書きます。");

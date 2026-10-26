@@ -1408,3 +1408,175 @@ def test_permission_change_updates_the_list_without_a_new_mtime(tmp_path):
     finally:
         stored.chmod(before.st_mode)
     assert "unusable" not in session.view()["cards"][0]["slots"][0]["files"][0]
+
+
+def test_failed_branch_delete_save_keeps_the_slot(tmp_path):
+    first = tmp_path / "先.pdf"
+    second = tmp_path / "枝.pdf"
+    _pdf(first, ["A"])
+    _pdf(second, ["B"])
+    session = Session(tmp_path)
+    session.add_file(1, 0, str(first))
+    session.add_branch(1)
+    session.add_file(1, 1, str(second))
+    output = tmp_path / "LexCrew-PDF-Downloads"
+    output.chmod(0o555)
+    try:
+        with pytest.raises(OSError):
+            session.delete_slot(1, 0)
+        names = [Path(slot.files[0]).name for slot in session.layout.cards[0].slots]
+        assert names == ["先.pdf", "枝.pdf"]
+    finally:
+        output.chmod(0o755)
+    session.set_title(1, "残る", 0)
+    reloaded = Session(tmp_path)
+    slots = reloaded.layout.cards[0].slots
+    assert [Path(slot.files[0]).name for slot in slots] == ["先.pdf", "枝.pdf"]
+    assert slots[0].title == "残る"
+
+
+def test_stale_delete_failure_keeps_the_published_name(tmp_path, monkeypatch):
+    source = tmp_path / "契約.pdf"
+    _pdf(source, ["BODY"])
+    session = Session(tmp_path)
+    session.add_file(1, 0, str(source))
+    session.set_title(1, "契約", 0)
+    _use_font(monkeypatch)
+    assert session.generate()["ok"] is True
+    dest = tmp_path / "LexCrew-PDF-Downloads"
+    old = dest / "甲001 契約.pdf"
+    previous = old.read_bytes()
+    session.set_title(1, "改", 0)
+    real = Path.unlink
+    armed = {"on": True}
+
+    def flaky(self, *args, **kwargs):
+        if armed["on"] and self.name == "甲001 契約.pdf":
+            raise OSError(13, "Permission denied", str(self))
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", flaky)
+    failed = session.generate()
+    armed["on"] = False
+    names = sorted(path.name for path in dest.glob("*.pdf"))
+    assert (dest / "甲001 改.pdf").is_file()
+    assert old.read_bytes() == previous
+    assert names == ["甲001 契約.pdf", "甲001 改.pdf"]
+    assert all(" (2)" not in name for name in names)
+    assert set(session.layout.last_written) == {"甲001 契約.pdf", "甲001 改.pdf"}
+    assert failed["ok"] is False
+    assert "保存しました" in failed["message"]
+    assert "保存できませんでした" not in failed["message"]
+    assert "削除できませんでした。甲001 契約.pdf" in failed["message"]
+    assert str(old) not in failed["message"]
+    again = session.generate()
+    assert again["ok"] is True
+    left = sorted(path.name for path in dest.glob("*.pdf"))
+    assert left == ["甲001 改.pdf"]
+    assert " (2)" not in again["message"]
+
+
+def test_replacing_an_excluded_first_file_uses_the_editor_page_order(tmp_path, monkeypatch):
+    """edit.js は出すページを先に、除くページを後に保存する。"""
+    first = tmp_path / "先.pdf"
+    second = tmp_path / "後.pdf"
+    new = tmp_path / "差替.pdf"
+    _pdf(first, ["OLD"])
+    _pdf(second, ["SECOND"])
+    _pdf(new, ["NEW"])
+    session = Session(tmp_path)
+    session.add_file(1, 0, str(first))
+    session.add_file(1, 0, str(second))
+    session.set_title(1, "契約", 0)
+    session.set_pages(1, [
+        {"source": 1, "page": 0, "part": 0, "group": 1},
+        {"source": 0, "page": 0, "part": 0, "group": 0},
+    ], 0)
+    assert session.layout.cards[0].pages is not None
+    session.replace_file(1, 0, 0, str(new))
+    _use_font(monkeypatch)
+    result = session.generate()
+    assert result["ok"] is True
+    written = list((tmp_path / "LexCrew-PDF-Downloads").glob("*.pdf"))
+    assert [path.name for path in written] == ["甲001 契約.pdf"]
+    texts = _texts(written[0])
+    assert "NEW" in texts[0]
+    assert "甲第１号証" in texts[0]
+    assert "SECOND" in texts[1]
+    assert "OLD" not in "\n".join(texts)
+
+
+def test_replace_slot_clears_the_missing_message(tmp_path):
+    good = tmp_path / "本文.pdf"
+    secret = tmp_path / "secret.pdf"
+    _pdf(good, ["BODY"])
+    _encrypted(secret)
+    session = Session(tmp_path)
+    session.add_file(1, 0, str(secret))
+    blocked = session.generate()
+    assert blocked["ok"] is False
+    assert blocked["cards"][0]["message"] == "原本が見つかりません：secret.pdf"
+    session.replace_slot(1, 0, [str(good)])
+    message = session.view()["cards"][0]["message"]
+    assert "原本が見つかりません" not in message
+    assert "secret.pdf" not in message
+
+    other = tmp_path / "dropped"
+    other.mkdir()
+    dropped = Session(other)
+    dropped.add_file(1, 0, str(secret))
+    assert dropped.generate()["cards"][0]["message"] == "原本が見つかりません：secret.pdf"
+    dropped.drop_files(1, 0, None, [str(good)], replace=True)
+    cleared = dropped.view()["cards"][0]["message"]
+    assert "原本が見つかりません" not in cleared
+    assert "secret.pdf" not in cleared
+
+
+def test_same_copy_referenced_twice_can_be_deleted(tmp_path):
+    left = tmp_path / "a"
+    right = tmp_path / "b"
+    left.mkdir()
+    right.mkdir()
+    first = left / "契約.pdf"
+    second = right / "契約.pdf"
+    _pdf(first, ["SAME"])
+    second.write_bytes(first.read_bytes())
+    layout = default_layout()
+    cards = list(layout.cards)
+    cards[0] = replace(
+        cards[0],
+        slots=(replace(cards[0].slots[0], files=("a/契約.pdf", "b/契約.pdf")),),
+    )
+    save_layout(tmp_path, replace(layout, cards=tuple(cards)))
+    session = Session(tmp_path)
+    files = session.layout.cards[0].slots[0].files
+    assert files[0] == files[1]
+    copy = Path(files[0])
+    assert copy.is_file()
+    assert copy.read_bytes() == first.read_bytes()
+    session.delete_slot(1, 0)
+    assert not copy.exists()
+
+
+def test_comma_in_a_file_name_stays_in_the_card_message(tmp_path):
+    comma = tmp_path / "請求書、領収書.pdf"
+    neighbor = tmp_path / "隣.pdf"
+    good = tmp_path / "本文.pdf"
+    other = tmp_path / "別.pdf"
+    _encrypted(comma)
+    _encrypted(neighbor)
+    _pdf(good, ["BODY"])
+    _pdf(other, ["OTHER"])
+    session = Session(tmp_path)
+    session.add_file(1, 0, str(comma))
+    session.add_file(1, 0, str(neighbor))
+    blocked = session.generate()
+    assert blocked["ok"] is False
+    assert "請求書、領収書.pdf" in blocked["cards"][0]["message"]
+    session.replace_file(1, 0, 1, str(good))
+    message = session.view()["cards"][0]["message"]
+    assert message == "原本が見つかりません：請求書、領収書.pdf"
+    session.replace_file(1, 0, 0, str(other))
+    cleared = session.view()["cards"][0]["message"]
+    assert "原本が見つかりません" not in cleared
+    assert "請求書、領収書.pdf" not in cleared

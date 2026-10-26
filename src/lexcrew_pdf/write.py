@@ -122,7 +122,14 @@ def write_jobs(
                 "deleted": (),
             }
     keep = {row["filename"] for row in written} | set(preserve)
-    deleted = _delete_stale(dest, last_written, keep)
+    deleted, stale_failed = _delete_stale(dest, last_written, keep)
+    for name in stale_failed:
+        errors.append({
+            "filename": name,
+            "stampLabel": "",
+            "message": f"削除できませんでした。{name}",
+        })
+        keep.add(name)
     return {
         "written": written,
         "errors": errors,
@@ -248,10 +255,11 @@ def _checked_output_path(dest: Path, filename: str) -> Path:
     return path
 
 
-def _delete_stale(dest: Path, last_written, keep: set[str]) -> list[str]:
+def _delete_stale(dest: Path, last_written, keep: set[str]) -> tuple[list[str], list[str]]:
     if not dest.is_dir():
-        return []
+        return [], []
     deleted: list[str] = []
+    failed: list[str] = []
     for name in last_written:
         if name in keep:
             continue
@@ -259,13 +267,19 @@ def _delete_stale(dest: Path, last_written, keep: set[str]) -> list[str]:
             path = _checked_output_path(dest, name)
         except ValueError:
             continue
-        if path.is_file():
-            path.unlink()
-            deleted.append(name)
+        try:
+            if path.is_file():
+                path.unlink()
+                deleted.append(name)
+        except OSError:
+            failed.append(name)
     for path in list(dest.glob("*.writing")):
-        if path.is_file():
-            path.unlink()
-    return deleted
+        try:
+            if path.is_file():
+                path.unlink()
+        except OSError:
+            pass
+    return deleted, failed
 
 
 def _short_error(exc: Exception) -> str:

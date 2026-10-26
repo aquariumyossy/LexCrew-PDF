@@ -893,6 +893,65 @@ def test_boot_starts_when_the_output_folder_cannot_be_read(monkeypatch, tmp_path
         output.chmod(0o755)
 
 
+def test_edit_after_unreadable_boot_reloads_the_saved_layout(monkeypatch, tmp_path):
+    source = tmp_path / "契約書.pdf"
+    _pdf(source, ["BODY"])
+    case = tmp_path / "case"
+    case.mkdir()
+    prepared = Session(case)
+    prepared.add_file(1, 0, str(source))
+    prepared.set_title(1, "契約書", 0)
+    stored_name = Path(prepared.layout.cards[0].slots[0].files[0]).name
+    output = case / "LexCrew-PDF-Downloads"
+    layout_file = output / "layout.json"
+    before = layout_file.read_bytes()
+    assert "契約書" in before.decode("utf-8")
+    output.chmod(0)
+    monkeypatch.setenv("LEXCREW_FOLDER", str(case))
+    try:
+        session = app_window.boot()
+        assert session.notice == "配置ファイルを読めません。"
+        assert session.view()["message"] == "配置ファイルを読めません。"
+        with pytest.raises(OSError):
+            session.add_card()
+    finally:
+        output.chmod(0o755)
+    assert layout_file.read_bytes() == before
+    session.add_card()
+    saved = json.loads(layout_file.read_text(encoding="utf-8"))
+    first = saved["cards"][0]
+    assert first["slots"][0]["title"] == "契約書"
+    assert stored_name in first["slots"][0]["files"][0]
+    assert len(saved["cards"]) == 7
+    assert session.notice == ""
+    assert session.view()["message"] == ""
+
+
+def test_second_confirm_shows_the_names_that_will_be_written():
+    source = (Path(__file__).resolve().parents[1] / "ui" / "app.js").read_text(encoding="utf-8")
+    start = source.index("function confirmGenerate")
+    end = source.index("\nconst help")
+    script = (
+        "const calls = [];\n"
+        "const window = { confirm(text) { calls.push(text); return true; } };\n"
+        + source[start:end]
+        + "confirmGenerate({replace: [], delete: ['甲001 契約.pdf'], keep: [], writing: ['甲001 変更.pdf']});\n"
+        + "confirmGenerate({replace: [], delete: ['甲001 契約.pdf'], keep: [], writing: ['甲001 別.pdf']});\n"
+        + "confirmGenerate({replace: [], delete: [], keep: [], writing: ['甲001 初回.pdf']});\n"
+        + "process.stdout.write(JSON.stringify(calls));\n"
+    )
+    completed = subprocess.run(["node"], input=script, capture_output=True, text=True, check=True)
+    calls = json.loads(completed.stdout)
+    assert len(calls) == 2
+    assert calls[0] != calls[1]
+    assert "次のファイルを書きます。" in calls[0]
+    assert "甲001 変更.pdf" in calls[0]
+    assert "甲001 別.pdf" in calls[1]
+    assert "変更" not in calls[1]
+    assert "甲001 契約.pdf" in calls[0]
+    assert "甲001 契約.pdf" in calls[1]
+
+
 def test_boot_uses_lexcrew_folder_when_set(monkeypatch, tmp_path):
     chosen = tmp_path / "chosen"
     chosen.mkdir()

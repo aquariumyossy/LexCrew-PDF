@@ -115,6 +115,7 @@ def release_copies(stored_paths, *, live: tuple[str, ...] | list[str] = ()) -> t
         return ()
     live_keys = _keys(live)
     pending: list[Path] = []
+    seen: set[str] = set()
     for stored in stored_paths:
         path = _resolved_stored(None, stored)
         if path is None or not _is_app_copy(path):
@@ -127,6 +128,10 @@ def release_copies(stored_paths, *, live: tuple[str, ...] | list[str] = ()) -> t
         except OSError:
             return (path.name,)
         if exists:
+            key = str(path)
+            if key in seen:
+                continue
+            seen.add(key)
             pending.append(path)
     held: list[tuple[Path, Path]] = []
     try:

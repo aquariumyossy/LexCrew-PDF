@@ -11,7 +11,6 @@ from .layout import (
     PageRow,
     Slot,
     check_original,
-    missing_original_message,
     resolve_stored_path,
     stored_file_name,
     unreadable_original_message,
@@ -29,7 +28,7 @@ from .names import (
     title_only_filename,
 )
 from .pages import GROUP_PRIMARY, resolve_buckets
-from .stamp import inspect_source_pages
+from .stamp import inspect_source_pages, open_source
 
 
 @dataclass(frozen=True)
@@ -97,37 +96,15 @@ def jobs_from_layout(layout: Layout, folder: Path) -> PlanBuild:
         layout.stamp_enabled,
         blocked=foreign_output_names(folder, layout.last_written),
     )
-    # 出せない号証の名前を先に取る。後のカードが同じ書名で、その証拠 PDF を上書きしない。
-    reserved: dict[int, tuple[list, list, list, list]] = {}
     for card in layout.cards:
-        failure = _stat_failure(card, folder)
-        if failure is None:
-            continue
-        reserved[card.number] = (
-            [],
-            [_card_error(card, failure)],
-            _preserve_names(
-                layout.label_template,
-                card,
-                merge_branches=layout.merge_branches,
-                shown=shown_number(layout.first_number, card.number),
-                book=book,
-            ),
-            [],
+        built, card_errors, card_preserve, card_warnings = _jobs_for_card(
+            layout.label_template,
+            card,
+            folder,
+            merge_branches=layout.merge_branches,
+            shown=shown_number(layout.first_number, card.number),
+            book=book,
         )
-    for card in layout.cards:
-        shown = shown_number(layout.first_number, card.number)
-        if card.number in reserved:
-            built, card_errors, card_preserve, card_warnings = reserved[card.number]
-        else:
-            built, card_errors, card_preserve, card_warnings = _jobs_for_card(
-                layout.label_template,
-                card,
-                folder,
-                merge_branches=layout.merge_branches,
-                shown=shown,
-                book=book,
-            )
         jobs.extend(built)
         errors.extend(card_errors)
         preserve.extend(card_preserve)
@@ -169,23 +146,36 @@ def slot_job(jobs, number: int, slot_index: int) -> OutputJob | None:
     return None
 
 
-def _stat_failure(card: Card, folder: Path) -> str | None:
-    """開く前に分かる欠落。権限で読めない原本は、無い原本より先に案内する。"""
-    flat = _flat_files(card)
-    if not flat:
-        return None
-    states = [check_original(folder, stored) for stored in flat]
-    blocked_names = tuple(
-        stored_file_name(stored) for stored, state in zip(flat, states) if state is OriginalState.UNREADABLE
-    )
-    if blocked_names:
-        return unreadable_original_message(blocked_names)
-    missing_names = tuple(
-        stored_file_name(stored) for stored, state in zip(flat, states) if state is OriginalState.MISSING
-    )
-    if missing_names:
-        return missing_original_message(missing_names)
-    return None
+def generation_blockers(layout: Layout, folder: Path) -> tuple[tuple[int, tuple[str, ...]], ...]:
+    """書けない原本があるカード。(カード番号, ファイル名) をカードの順で返す。
+
+    無いファイルは開かない。あるファイルは実際に開く。stat だけでは、
+    権限や他のアプリのロック、壊れた PDF を見落とす。
+    """
+    found: list[tuple[int, tuple[str, ...]]] = []
+    for card in layout.cards:
+        names = tuple(stored_file_name(stored) for stored in _unusable_stored(folder, _flat_files(card)))
+        if names:
+            found.append((card.number, names))
+    return tuple(found)
+
+
+def _unusable_stored(folder: Path, stored_files) -> tuple[str, ...]:
+    bad: list[str] = []
+    for stored in stored_files:
+        state = check_original(folder, stored)
+        if state is not OriginalState.PRESENT:
+            bad.append(stored)
+            continue
+        document = None
+        try:
+            document = open_source(str(resolve_stored_path(folder, stored)))
+        except Exception:
+            bad.append(stored)
+        finally:
+            if document is not None:
+                document.close()
+    return tuple(bad)
 
 
 def _jobs_for_card(
@@ -200,12 +190,6 @@ def _jobs_for_card(
     flat = _flat_files(card)
     if not flat:
         return [], [], [], []
-    failure = _stat_failure(card, folder)
-    if failure is not None:
-        # 無い原本や開けない原本が一つでもある号証は出さない。前回の証拠 PDF は呼び出し側が残す。
-        return [], [_card_error(card, failure)], _preserve_names(
-            series, card, merge_branches=merge_branches, shown=shown, book=book,
-        ), []
     return _jobs_for_present_card(
         series,
         card,

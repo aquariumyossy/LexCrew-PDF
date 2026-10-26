@@ -56,19 +56,22 @@ def is_stored_copy(folder: Path | None, stored: str) -> bool:
 
 def remember_case(folder: Path) -> None:
     """この出力フォルダの配置を、複製を消す前の参照確認に使う。"""
-    cases = _read_cases()
-    if cases is None:
+    try:
+        cases = _read_cases()
+        if cases is None:
+            return
+        root = originals_dir().parent
+        root.mkdir(parents=True, exist_ok=True)
+        registry = _registry_path()
+        text = str(folder.resolve())
+        if text in cases:
+            return
+        cases.append(text)
+        temporary = registry.with_name(registry.name + ".writing")
+        temporary.write_text(json.dumps(cases, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(temporary, registry)
+    except OSError:
         return
-    root = originals_dir().parent
-    root.mkdir(parents=True, exist_ok=True)
-    registry = _registry_path()
-    text = str(folder.resolve())
-    if text in cases:
-        return
-    cases.append(text)
-    temporary = registry.with_name(registry.name + ".writing")
-    temporary.write_text(json.dumps(cases, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(temporary, registry)
 
 
 def adopt_originals(folder: Path, layout: Layout) -> Layout:
@@ -109,7 +112,11 @@ def release_copies(stored_paths, *, live: tuple[str, ...] | list[str] = ()) -> N
         keys = _keys((stored, str(path)))
         if keys & live_keys or keys & saved:
             continue
-        if path.is_file():
+        try:
+            exists = path.is_file()
+        except OSError:
+            return
+        if exists:
             path.unlink()
         parent = path.parent
         if parent != originals_dir().resolve() and parent.is_dir() and not any(parent.iterdir()):
@@ -122,7 +129,11 @@ def _registry_path() -> Path:
 
 def _read_cases() -> list[str] | None:
     registry = _registry_path()
-    if not registry.is_file():
+    try:
+        exists = registry.is_file()
+    except OSError:
+        return None
+    if not exists:
         return []
     try:
         raw = json.loads(registry.read_text(encoding="utf-8"))
@@ -142,7 +153,11 @@ def _saved_references() -> set[str] | None:
     for case in cases:
         folder = Path(case)
         layout_file = folder / OUTPUT_DIR_NAME / LAYOUT_NAME
-        if not layout_file.is_file():
+        try:
+            exists = layout_file.is_file()
+        except OSError:
+            return None
+        if not exists:
             continue
         try:
             raw = json.loads(layout_file.read_text(encoding="utf-8"))

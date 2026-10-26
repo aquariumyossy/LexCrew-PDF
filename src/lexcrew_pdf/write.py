@@ -24,7 +24,6 @@ def write_jobs(
     *,
     last_written: tuple[str, ...] | list[str],
     preserve: tuple[str, ...] | list[str] = (),
-    reserved: tuple[str, ...] | list[str] = (),
     grayscale: bool = False,
     style=None,
     page_numbers: PageNumberStyle | None = None,
@@ -47,12 +46,10 @@ def write_jobs(
     replaced: list[str] = []
     failed = set(preserve)
     owned = set(last_written)
-    # 出せない号証が先に取った名前は、前回このアプリが書いたファイルでも上書きしない。
-    held = set(reserved)
     for job in jobs:
         _checked_output_path(dest, job.filename)
         target = dest / job.filename
-        if job.filename in held or (target.is_file() and job.filename not in owned):
+        if target.is_file() and job.filename not in owned:
             failed.add(job.filename)
             errors.append({
                 "filename": job.filename,

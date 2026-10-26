@@ -535,14 +535,12 @@ def test_generation_reports_a_vanished_original_and_skips_the_partial_pdf(tmp_pa
         return real_open(path)
 
     monkeypatch.setattr(stamp, "open_source", spy)
-    built = jobs_from_layout(session.layout, tmp_path)
-    assert built.jobs == ()
-    assert [row["number"] for row in built.errors] == [1, 2]
-    assert built.errors[0]["message"] == "原本が見つかりません：消えた契約書.pdf"
-    assert built.errors[1]["message"] == "原本が見つかりません：無い付属.pdf"
+    monkeypatch.setattr("lexcrew_pdf.plan.open_source", spy)
+    preview = session.preview_generate()
+    assert preview["replace"] == []
+    assert preview["delete"] == []
     assert "消えた契約書.pdf" not in opened
     assert "無い付属.pdf" not in opened
-    assert str(tmp_path) not in built.errors[0]["message"]
 
     opened.clear()
     result = session.generate()

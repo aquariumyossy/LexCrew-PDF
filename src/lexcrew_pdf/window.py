@@ -10,7 +10,12 @@ import unicodedata
 from ctypes import wintypes
 from pathlib import Path
 
-from .layout import FILE_DIALOG_TYPES, require_source_file
+from .layout import (
+    FILE_DIALOG_TYPES,
+    missing_original_message,
+    require_source_file,
+    unreadable_original_message,
+)
 from .session import Session, downloads_dir
 
 # ハンドルを関数の中だけに置くと、ガベージコレクションでミューテックスが外れる。
@@ -619,8 +624,8 @@ class EditorApi:
     def _run(self, fn):
         try:
             return fn()
-        except ValueError as exc:
-            return {"ok": False, "message": str(exc)}
+        except Exception as exc:
+            return {"ok": False, "message": _editor_error(exc)}
 
 
 def _editor_error(exc: BaseException) -> str:
@@ -629,7 +634,19 @@ def _editor_error(exc: BaseException) -> str:
         text = str(exc)
         if "/" not in text and "\\" not in text and "Errno" not in text:
             return text
+    name = _exception_file_name(exc)
+    if isinstance(exc, FileNotFoundError) and name:
+        return missing_original_message((name,))
+    if name:
+        return unreadable_original_message((name,))
     return "原本を開けません。"
+
+
+def _exception_file_name(exc: BaseException) -> str:
+    filename = getattr(exc, "filename", None)
+    if not filename:
+        return ""
+    return Path(str(filename)).name
 
 
 def _norm_name(name: str) -> str:

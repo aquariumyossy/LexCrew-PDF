@@ -255,7 +255,11 @@ class Session:
         self.layout = adopted
         self.card_errors = {}
         if adopted != loaded:
-            self._persist()
+            try:
+                self._persist()
+            except OSError:
+                # 出力先が書けなくても起動は続ける。今作った複製は消さない。
+                pass
         remember_case(folder)
 
     @_locked
@@ -536,7 +540,14 @@ class Session:
         masks = _drop_sources(card.masks, flat, 1, 1)
         trims = _drop_sources(card.trims, flat, 1, 1)
         skews = _drop_sources(card.skews, flat, 1, 1)
-        self._put(_replace(card, slots=tuple(slots), pages=None, masks=masks, trims=trims, skews=skews))
+        self._put(_replace(
+            card,
+            slots=tuple(slots),
+            pages=_drop_pages(card.pages, flat, 1, 1),
+            masks=masks,
+            trims=trims,
+            skews=skews,
+        ))
         self._release(old)
         return self.view()
 
@@ -595,6 +606,9 @@ class Session:
         """枝番カードの編集は、その枝番の出すページと、その原本の除くページだけ。"""
         card = self._card(number)
         _check_slot(card, slot_index)
+        problem = _editor_problem_message(self.folder, card)
+        if problem is not None:
+            raise ValueError(problem)
         try:
             natural, files_per_slot = self._natural(card)
             buckets = _resolved(card, natural, files_per_slot)
@@ -615,15 +629,9 @@ class Session:
             text = str(exc)
             if "/" not in text and "\\" not in text and "Errno" not in text:
                 raise
-            names = tuple(
-                stored_file_name(stored) for slot in card.slots for stored in slot.files
-            )
-            raise ValueError(unreadable_original_message(names)) from None
+            raise ValueError(_editor_problem_message(self.folder, card) or "原本を開けません。") from None
         except Exception:
-            names = tuple(
-                stored_file_name(stored) for slot in card.slots for stored in slot.files
-            )
-            raise ValueError(unreadable_original_message(names)) from None
+            raise ValueError(_editor_problem_message(self.folder, card) or "原本を開けません。") from None
         return {
             "number": number,
             "slot": slot_index,
@@ -1093,11 +1101,13 @@ class Session:
 
         if self.folder is None:
             return {"replace": [], "delete": [], "keep": []}
+        from .plan import generation_blockers
+
+        if generation_blockers(self.layout, self.folder):
+            return {"replace": [], "delete": [], "keep": []}
         built = jobs_from_layout(self.layout, self.folder)
         names = [job.filename for job in built.jobs]
-        # 失敗する生成の確認では、名前が変わった前回の証拠 PDF を削除予定にしない。
-        retain = self.layout.last_written if built.errors else ()
-        return pending_writes(self.folder, names, self.layout.last_written, built.kept, retain=retain)
+        return pending_writes(self.folder, names, self.layout.last_written, built.kept)
 
     def generate(self) -> dict:
         from .plan import jobs_from_layout
@@ -1113,17 +1123,45 @@ class Session:
             grayscale = layout.grayscale
             style = layout.stamp
             page_numbers = layout.page_numbers
+        from .plan import generation_blockers
+
+        blocked = generation_blockers(layout, folder)
+        if blocked:
+            with self._lock:
+                # 無い原本の案内は、今のファイルから出す。開けない原本だけカードに残す。
+                for number, names in blocked:
+                    card = next((item for item in self.layout.cards if item.number == number), None)
+                    if card is None:
+                        continue
+                    known = {
+                        stored_file_name(stored)
+                        for stored in _flat_card_files(card)
+                        if check_original(folder, stored) is not OriginalState.PRESENT
+                    }
+                    extra = tuple(name for name in names if name not in known)
+                    if extra:
+                        self.card_errors[number] = missing_original_message(extra)
+                view = self.view()
+            listed: list[str] = []
+            for _number, names in blocked:
+                listed.extend(names)
+            return {
+                "ok": False,
+                "written": [],
+                "errors": [
+                    {"number": number, "message": missing_original_message(names)}
+                    for number, names in blocked
+                ],
+                **view,
+                "message": missing_original_message(tuple(listed)),
+            }
         built = jobs_from_layout(layout, folder)
-        preserve = list(built.preserve)
-        if built.errors:
-            preserve.extend(name for name in last_written if name not in preserve)
         try:
             result = write_jobs(
                 folder,
                 built.jobs,
                 last_written=last_written,
-                preserve=preserve,
-                reserved=built.preserve,
+                preserve=built.preserve,
                 grayscale=grayscale,
                 style=style,
                 page_numbers=page_numbers,
@@ -1194,11 +1232,15 @@ class Session:
         slot_count = len(card.slots)
         shown = self._shown(card.number)
         states, skip = self._presence(card)
+        from .plan import _unusable_stored
 
-        unusable = any(
+        stat_blocked = any(
             state is OriginalState.MISSING or state is OriginalState.UNREADABLE
             for slot_states in states
             for state in slot_states
+        )
+        unusable = stat_blocked or bool(
+            _unusable_stored(self.folder, _flat_card_files(card)) if self.folder is not None else ()
         )
         if unusable:
             choice = MergeChoice()
@@ -1392,6 +1434,48 @@ class Session:
             paths, split=card.split_a4, tilts=tilts,
         )
         return list(natural), [len(slot.files) for slot in card.slots]
+
+
+def _flat_card_files(card: Card) -> tuple[str, ...]:
+    return tuple(stored for slot in card.slots for stored in slot.files)
+
+
+def _editor_problem_message(folder: Path | None, card: Card) -> str | None:
+    """開けない原本のファイル名だけ。カード内の他の原本は案内に入れない。"""
+    from .layout import resolve_stored_path
+    from .stamp import open_source
+
+    if folder is None:
+        return None
+    missing: list[str] = []
+    blocked: list[str] = []
+    for stored in _flat_card_files(card):
+        name = stored_file_name(stored)
+        state = check_original(folder, stored)
+        if state is OriginalState.MISSING:
+            missing.append(name)
+            continue
+        if state is OriginalState.UNREADABLE:
+            blocked.append(name)
+            continue
+        document = None
+        try:
+            document = open_source(str(resolve_stored_path(folder, stored)))
+        except FileNotFoundError:
+            missing.append(name)
+        except Exception:
+            blocked.append(name)
+        finally:
+            if document is not None:
+                document.close()
+    parts: list[str] = []
+    if missing:
+        parts.append(missing_original_message(tuple(missing)))
+    if blocked:
+        parts.append(unreadable_original_message(tuple(blocked)))
+    if not parts:
+        return None
+    return " ".join(parts)
 
 
 def _whole(value) -> int:

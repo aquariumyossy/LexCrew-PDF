@@ -97,7 +97,9 @@ def test_missing_original_survives_close_and_returns_with_the_file(tmp_path, mon
     monkeypatch.setattr("lexcrew_pdf.write.stamp_sources_to_pdf", lambda *args, **kwargs: b"%PDF-1.4\n")
     generated = restored.generate()
     assert generated["ok"] is False
-    assert [row["filename"] for row in generated["written"]] == ["甲005 残す.pdf"]
+    assert generated["written"] == []
+    assert list((tmp_path / "LexCrew-PDF-Downloads").glob("*.pdf")) == []
+    assert generated["message"] == "原本が見つかりません：契約書.pdf"
     assert "Errno 2" not in generated["message"]
     assert "原本を開けません" not in generated["message"]
     assert str(missing) not in generated["message"]
@@ -384,6 +386,10 @@ def test_unreadable_branch_preserves_each_slots_filename(tmp_path):
     session.add_file(1, 0, str(broken))
     session.add_branch(1)
     session.add_file(1, 1, str(other))
+    view = session.view()["cards"][0]
+    assert view["mergedFilename"] == ""
+    assert view["mergeWarning"] == ""
+    assert all(slot["outputNote"] == "" for slot in view["slots"])
     built = jobs_from_layout(session.layout, tmp_path)
     assert built.jobs == ()
     assert built.preserve == ("甲001-1~2 壊れ.pdf",)

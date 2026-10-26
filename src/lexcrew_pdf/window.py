@@ -328,7 +328,10 @@ class Api:
         return self.session.view()
 
     def editor(self, number: int, slot_index: int = 0) -> dict:
-        return self._run(lambda: self.session.editor(int(number), int(slot_index)))
+        try:
+            return self.session.editor(int(number), int(slot_index))
+        except Exception as exc:
+            return {**self.session.view(), "ok": False, "message": _editor_error(exc)}
 
     def set_pages(self, number: int, slot_index: int, pages: list) -> dict:
         return self._run(lambda: self.session.set_pages(int(number), pages, int(slot_index)))
@@ -515,7 +518,10 @@ class EditorApi:
         return self._run(self.session.edit_context)
 
     def editor(self, number: int, slot_index: int = 0) -> dict:
-        return self._run(lambda: self.session.editor(int(number), int(slot_index)))
+        try:
+            return self.session.editor(int(number), int(slot_index))
+        except Exception as exc:
+            return {"ok": False, "message": _editor_error(exc)}
 
     def set_pages(self, number: int, slot_index: int, pages: list) -> dict:
         return self._commit(lambda: self.session.set_pages(int(number), pages, int(slot_index)))
@@ -615,6 +621,15 @@ class EditorApi:
             return fn()
         except ValueError as exc:
             return {"ok": False, "message": str(exc)}
+
+
+def _editor_error(exc: BaseException) -> str:
+    """編集画面の失敗。原本置き場の絶対パスや Errno は出さない。"""
+    if isinstance(exc, ValueError):
+        text = str(exc)
+        if "/" not in text and "\\" not in text and "Errno" not in text:
+            return text
+    return "原本を開けません。"
 
 
 def _norm_name(name: str) -> str:

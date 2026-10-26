@@ -97,15 +97,37 @@ def jobs_from_layout(layout: Layout, folder: Path) -> PlanBuild:
         layout.stamp_enabled,
         blocked=foreign_output_names(folder, layout.last_written),
     )
+    # 出せない号証の名前を先に取る。後のカードが同じ書名で、その証拠 PDF を上書きしない。
+    reserved: dict[int, tuple[list, list, list, list]] = {}
     for card in layout.cards:
-        built, card_errors, card_preserve, card_warnings = _jobs_for_card(
-            layout.label_template,
-            card,
-            folder,
-            merge_branches=layout.merge_branches,
-            shown=shown_number(layout.first_number, card.number),
-            book=book,
+        failure = _stat_failure(card, folder)
+        if failure is None:
+            continue
+        reserved[card.number] = (
+            [],
+            [_card_error(card, failure)],
+            _preserve_names(
+                layout.label_template,
+                card,
+                merge_branches=layout.merge_branches,
+                shown=shown_number(layout.first_number, card.number),
+                book=book,
+            ),
+            [],
         )
+    for card in layout.cards:
+        shown = shown_number(layout.first_number, card.number)
+        if card.number in reserved:
+            built, card_errors, card_preserve, card_warnings = reserved[card.number]
+        else:
+            built, card_errors, card_preserve, card_warnings = _jobs_for_card(
+                layout.label_template,
+                card,
+                folder,
+                merge_branches=layout.merge_branches,
+                shown=shown,
+                book=book,
+            )
         jobs.extend(built)
         errors.extend(card_errors)
         preserve.extend(card_preserve)
@@ -147,6 +169,25 @@ def slot_job(jobs, number: int, slot_index: int) -> OutputJob | None:
     return None
 
 
+def _stat_failure(card: Card, folder: Path) -> str | None:
+    """開く前に分かる欠落。権限で読めない原本は、無い原本より先に案内する。"""
+    flat = _flat_files(card)
+    if not flat:
+        return None
+    states = [check_original(folder, stored) for stored in flat]
+    blocked_names = tuple(
+        stored_file_name(stored) for stored, state in zip(flat, states) if state is OriginalState.UNREADABLE
+    )
+    if blocked_names:
+        return unreadable_original_message(blocked_names)
+    missing_names = tuple(
+        stored_file_name(stored) for stored, state in zip(flat, states) if state is OriginalState.MISSING
+    )
+    if missing_names:
+        return missing_original_message(missing_names)
+    return None
+
+
 def _jobs_for_card(
     series: str,
     card: Card,
@@ -159,21 +200,10 @@ def _jobs_for_card(
     flat = _flat_files(card)
     if not flat:
         return [], [], [], []
-    states = [check_original(folder, stored) for stored in flat]
-    missing_names = tuple(
-        stored_file_name(stored) for stored, state in zip(flat, states) if state is OriginalState.MISSING
-    )
-    blocked_names = tuple(
-        stored_file_name(stored) for stored, state in zip(flat, states) if state is OriginalState.UNREADABLE
-    )
-    if blocked_names:
-        # 権限や切れた共有は開かない。号証全体は出さず、前回の名前は外す前のカードで残す。
-        return [], [_card_error(card, unreadable_original_message(blocked_names))], _preserve_names(
-            series, card, merge_branches=merge_branches, shown=shown, book=book,
-        ), []
-    if missing_names:
-        # 無い原本が一つでもある号証は出さない。前回の証拠 PDF は呼び出し側が残す。
-        return [], [_card_error(card, missing_original_message(missing_names))], _preserve_names(
+    failure = _stat_failure(card, folder)
+    if failure is not None:
+        # 無い原本や開けない原本が一つでもある号証は出さない。前回の証拠 PDF は呼び出し側が残す。
+        return [], [_card_error(card, failure)], _preserve_names(
             series, card, merge_branches=merge_branches, shown=shown, book=book,
         ), []
     return _jobs_for_present_card(

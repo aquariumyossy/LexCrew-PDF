@@ -1,4 +1,5 @@
 """原本の複製。生成結果は、書いた PDF のページ本文で見る。"""
+import json
 import os
 from dataclasses import replace
 from pathlib import Path
@@ -276,3 +277,318 @@ def test_adding_a_file_to_a_missing_slot_keeps_other_exclusions(tmp_path, monkey
     assert "DROP-PAGE" not in joined
     assert "PLACEHOLDER" not in joined
     assert "gone" not in result["cards"][0]["message"]
+
+
+def test_file_added_to_a_missing_second_branch_stays_in_that_branch(tmp_path, monkeypatch):
+    first = tmp_path / "本文.pdf"
+    second = tmp_path / "別紙.pdf"
+    added = tmp_path / "追加.pdf"
+    _pdf(first, ["SLOT0-A", "SLOT0-B"])
+    _pdf(second, ["OLD-BRANCH"])
+    _pdf(added, ["NEW-BRANCH"])
+    session = Session(tmp_path)
+    session.add_branch(1)
+    session.add_file(1, 0, str(first))
+    session.add_file(1, 1, str(second))
+    session.set_title(1, "契約", 0)
+    session.set_pages(1, [
+        {"source": 0, "page": 1, "part": 0, "group": 1},
+        {"source": 0, "page": 0, "part": 0, "group": 1},
+    ], 0)
+    assert session.layout.cards[0].pages is not None
+    _stored(session, 1, 1).unlink()
+    session.add_file(1, 1, str(added))
+    _use_font(monkeypatch)
+    result = session.generate()
+    dest = tmp_path / "LexCrew-PDF-Downloads"
+    written = list(dest.glob("*.pdf"))
+    assert [path.name for path in written] == ["甲001-1~2 契約.pdf"]
+    texts = _texts(written[0])
+    assert "SLOT0-B" in texts[0]
+    assert "甲第１号証の１" in texts[0]
+    assert "SLOT0-A" in texts[1]
+    assert "NEW-BRANCH" in texts[2]
+    assert "甲第１号証の２" in texts[2]
+    assert "OLD-BRANCH" not in "\n".join(texts)
+    assert "NEW-BRANCH" not in texts[0]
+    assert result["ok"] is True
+    assert result.get("deleted", ()) == () or "削除したファイル" not in result["message"]
+
+
+def test_adding_to_a_missing_branch_does_not_delete_the_previous_merged_pdf(tmp_path, monkeypatch):
+    first = tmp_path / "本文.pdf"
+    second = tmp_path / "別紙.pdf"
+    added = tmp_path / "追加.pdf"
+    _pdf(first, ["SLOT0-A", "SLOT0-B"])
+    _pdf(second, ["OLD-BRANCH"])
+    _pdf(added, ["NEW-BRANCH"])
+    session = Session(tmp_path)
+    session.add_branch(1)
+    session.add_file(1, 0, str(first))
+    session.add_file(1, 1, str(second))
+    session.set_title(1, "契約", 0)
+    session.set_pages(1, [
+        {"source": 0, "page": 1, "part": 0, "group": 1},
+        {"source": 0, "page": 0, "part": 0, "group": 1},
+    ], 0)
+    _use_font(monkeypatch)
+    first_result = session.generate()
+    assert [row["filename"] for row in first_result["written"]] == ["甲001-1~2 契約.pdf"]
+    output = tmp_path / "LexCrew-PDF-Downloads" / "甲001-1~2 契約.pdf"
+    assert "OLD-BRANCH" in _texts(output)[2]
+    _stored(session, 1, 1).unlink()
+    session.add_file(1, 1, str(added))
+    preview = session.preview_generate()
+    assert "甲001-1~2 契約.pdf" not in preview["delete"]
+    second = session.generate()
+    assert output.is_file()
+    texts = _texts(output)
+    assert "SLOT0-B" in texts[0]
+    assert "甲第１号証の１" in texts[0]
+    assert "NEW-BRANCH" in texts[2]
+    assert "甲第１号証の２" in texts[2]
+    assert "OLD-BRANCH" not in "\n".join(texts)
+    names = sorted(path.name for path in output.parent.glob("*.pdf"))
+    assert names == ["甲001-1~2 契約.pdf"]
+    assert "削除したファイル" not in second["message"]
+    assert second["ok"] is True
+
+
+def test_skipped_exhibit_name_is_not_overwritten_by_another_card(tmp_path, monkeypatch):
+    from lexcrew_pdf.plan import OutputJob
+    from lexcrew_pdf.write import write_jobs
+
+    later = tmp_path / "後.pdf"
+    earlier = tmp_path / "先.pdf"
+    _pdf(later, ["SECOND-BODY"])
+    _pdf(earlier, ["FIRST-BODY"])
+    session = Session(tmp_path)
+    session.set_stamp_enabled(False)
+    session.add_file(2, 0, str(later))
+    session.set_title(2, "契約", 0)
+    _use_font(monkeypatch)
+    assert session.generate()["ok"] is True
+    output = tmp_path / "LexCrew-PDF-Downloads" / "契約.pdf"
+    previous = output.read_bytes()
+    assert "SECOND-BODY" in _texts(output)[0]
+    session.add_file(1, 0, str(earlier))
+    session.set_title(1, "契約", 0)
+    _stored(session, 2).unlink()
+    result = session.generate()
+    assert output.read_bytes() == previous
+    assert "SECOND-BODY" in _texts(output)[0]
+    other = output.parent / "契約 (2).pdf"
+    assert other.is_file()
+    assert "FIRST-BODY" in _texts(other)[0]
+    assert "SECOND-BODY" not in _texts(other)[0]
+    assert result["ok"] is False
+    held = output.read_bytes()
+    job = OutputJob(
+        number=1,
+        sources=(str(earlier),),
+        stamp="",
+        filename="契約.pdf",
+        rotation=0,
+        split_a4=False,
+        pages=None,
+    )
+    refused = write_jobs(
+        tmp_path,
+        (job,),
+        last_written=("契約.pdf",),
+        reserved=("契約.pdf",),
+        stamp_enabled=False,
+    )
+    assert output.read_bytes() == held
+    assert refused["written"] == []
+    assert refused["replaced"] == ()
+    assert any(row["filename"] == "契約.pdf" for row in refused["errors"])
+    assert str(output) not in refused["errors"][0]["message"]
+
+
+def test_replace_on_a_missing_branch_keeps_other_branch_exclusions(tmp_path, monkeypatch):
+    body = tmp_path / "本文.pdf"
+    missing = tmp_path / "消えた.pdf"
+    replacement = tmp_path / "差替.pdf"
+    _pdf(body, ["KEEP-PAGE", "DROP-PAGE"])
+    _pdf(missing, ["GONE-PAGE"])
+    _pdf(replacement, ["NEW-PAGE"])
+    session = Session(tmp_path)
+    session.add_branch(1)
+    session.add_file(1, 0, str(body))
+    session.add_file(1, 1, str(missing))
+    session.set_title(1, "契約", 0)
+    session.set_pages(1, [
+        {"source": 0, "page": 0, "part": 0, "group": 1},
+        {"source": 0, "page": 1, "part": 0, "group": 0},
+    ], 0)
+    assert any(row.source == 0 and row.page == 1 and row.group == 0 for row in session.layout.cards[0].pages)
+    _stored(session, 1, 1).unlink()
+    session.drop_files(1, 1, None, [str(replacement)], replace=True)
+    pages = session.layout.cards[0].pages
+    assert pages is not None
+    assert any(row.source == 0 and row.page == 1 and row.group == 0 for row in pages)
+    assert any(row.source == 0 and row.page == 0 and row.group == 1 for row in pages)
+    _use_font(monkeypatch)
+    result = session.generate()
+    written = list((tmp_path / "LexCrew-PDF-Downloads").glob("*.pdf"))
+    assert [path.name for path in written] == ["甲001-1~2 契約.pdf"]
+    texts = _texts(written[0])
+    joined = "\n".join(texts)
+    assert "KEEP-PAGE" in texts[0]
+    assert "甲第１号証の１" in texts[0]
+    assert "NEW-PAGE" in texts[1]
+    assert "甲第１号証の２" in texts[1]
+    assert "DROP-PAGE" not in joined
+    assert "GONE-PAGE" not in joined
+    assert result["ok"] is True
+
+
+def test_unreadable_legacy_original_does_not_crash_startup(tmp_path, monkeypatch):
+    scans = tmp_path / "scans"
+    scans.mkdir()
+    blocked = scans / "秘密.pdf"
+    live = scans / "残す.pdf"
+    _pdf(blocked, ["SECRET-PAGE"])
+    _pdf(live, ["LIVE-PAGE"])
+    layout = default_layout()
+    cards = list(layout.cards)
+    cards[0] = replace(cards[0], slots=(replace(cards[0].slots[0], files=("scans/秘密.pdf",)),))
+    cards[1] = replace(cards[1], slots=(replace(cards[1].slots[0], files=("scans/残す.pdf",)),))
+    save_layout(tmp_path, replace(layout, cards=tuple(cards)))
+    blocked.chmod(0)
+    try:
+        session = Session(tmp_path)
+        assert session.layout.cards[0].slots[0].files == ("scans/秘密.pdf",)
+        copied = _stored(session, 2)
+        assert copied.is_file()
+        assert copied.read_bytes() == live.read_bytes()
+        assert copied != live
+        view = session.view()["cards"]
+        assert "原本が見つかりません" not in view[0]["message"]
+        assert str(blocked) not in view[0]["message"]
+        assert "scans" not in view[0]["message"]
+        _use_font(monkeypatch)
+        generated = session.generate()
+        message = generated["cards"][0]["message"]
+        assert message.startswith("原本を開けません。")
+        assert "秘密.pdf" in message
+        assert str(blocked) not in message
+        assert str(tmp_path) not in message
+        assert "原本が見つかりません" not in message
+        live_output = tmp_path / "LexCrew-PDF-Downloads" / "甲002 残す.pdf"
+        assert live_output.is_file()
+        assert "LIVE-PAGE" in _texts(live_output)[0]
+    finally:
+        blocked.chmod(0o644)
+
+
+def test_unreadable_ledger_or_layout_never_deletes_copies(tmp_path):
+    from lexcrew_pdf.originals import remember_case, release_copies
+
+    source = tmp_path / "証拠.pdf"
+    _pdf(source, ["BODY"])
+    session = Session(tmp_path)
+    session.add_file(1, 0, str(source))
+    copied = _stored(session, 1)
+    assert copied.is_file()
+    registry = originals_dir().parent / "cases.json"
+    registry.write_text("{", encoding="utf-8")
+    remember_case(tmp_path / "別の案件")
+    assert registry.read_text(encoding="utf-8") == "{"
+    release_copies([str(copied)], live=())
+    assert copied.is_file()
+    assert copied.read_bytes() == _pdf_bytes(source)
+    registry.write_text(json.dumps([str(tmp_path.resolve())], ensure_ascii=False), encoding="utf-8")
+    layout_file = tmp_path / "LexCrew-PDF-Downloads" / "layout.json"
+    layout_file.chmod(0)
+    try:
+        release_copies([str(copied)], live=())
+        assert copied.is_file()
+    finally:
+        layout_file.chmod(0o644)
+    layout_file.write_text("[]", encoding="utf-8")
+    release_copies([str(copied)], live=())
+    assert copied.is_file()
+    layout_file.unlink()
+    release_copies([str(copied)], live=())
+    assert not copied.exists()
+
+
+def _pdf_bytes(path: Path) -> bytes:
+    return path.read_bytes()
+
+
+def test_files_placed_in_the_store_by_hand_are_not_deleted(tmp_path):
+    from lexcrew_pdf.originals import is_stored_copy
+
+    source = tmp_path / "カード.pdf"
+    _pdf(source, ["CARD-PAGE"])
+    notes = originals_dir() / "notes"
+    notes.mkdir(parents=True)
+    planted = notes / "証拠原本.pdf"
+    planted.write_bytes(b"%PDF-1.4 planted\n")
+    assert is_stored_copy(tmp_path, str(planted)) is False
+    session = Session(tmp_path)
+    session.add_file(1, 0, str(source))
+    app_copy = _stored(session, 1)
+    assert app_copy.is_file()
+    card = session.layout.cards[0]
+    session._put(replace(card, slots=(replace(card.slots[0], files=(str(planted), str(app_copy))),)))
+    session.delete_slot(1, 0)
+    assert planted.is_file()
+    assert planted.read_bytes() == b"%PDF-1.4 planted\n"
+    assert notes.is_dir()
+    assert not app_copy.exists()
+
+    layout = default_layout()
+    cards = list(layout.cards)
+    cards[0] = replace(cards[0], slots=(replace(cards[0].slots[0], files=(str(planted),)),))
+    other = tmp_path / "other-case"
+    other.mkdir()
+    save_layout(other, replace(layout, cards=tuple(cards)))
+    before = planted.read_bytes()
+    adopted = Session(other)
+    assert planted.is_file()
+    assert planted.read_bytes() == before
+    copied = _stored(adopted, 1)
+    assert copied.is_file()
+    assert copied.read_bytes() == before
+    assert copied.parent.name != "notes"
+    assert len(copied.parent.name) == 32
+    adopted.delete_slot(1, 0)
+    assert planted.is_file()
+    assert planted.read_bytes() == before
+    assert not copied.exists()
+
+
+def test_editor_and_card_view_do_not_expose_the_originals_path(tmp_path):
+    import json
+
+    from lexcrew_pdf.window import Api, EditorApi
+
+    source = tmp_path / "契約書.pdf"
+    _pdf(source, ["PAGE"])
+    session = Session(tmp_path)
+    session.add_file(1, 0, str(source))
+    view = session.view()["cards"][0]
+    stored = view["slots"][0]["files"][0]["stored"]
+    assert stored == "契約書.pdf"
+    rendered = json.dumps(view, ensure_ascii=False)
+    assert str(originals_dir()) not in rendered
+    assert str(_stored(session, 1)) not in rendered
+    copied = _stored(session, 1)
+    copied.write_bytes(b"not a pdf")
+    api = Api(session)
+    result = api.editor(1, 0)
+    assert result["ok"] is False
+    assert result["message"].startswith("原本を開けません。")
+    assert "契約書.pdf" in result["message"]
+    assert str(originals_dir()) not in result["message"]
+    assert str(copied) not in result["message"]
+    assert "Errno" not in result["message"]
+    again = EditorApi(session, api).editor(1, 0)
+    assert again["ok"] is False
+    assert str(originals_dir()) not in again["message"]
+    assert str(copied) not in again["message"]
+    assert "Errno" not in again["message"]

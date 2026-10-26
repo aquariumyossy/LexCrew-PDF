@@ -51,17 +51,17 @@ def is_stored_copy(folder: Path | None, stored: str) -> bool:
     path = _resolved_stored(folder, stored)
     if path is None:
         return False
-    return _is_inside(path, originals_dir())
+    return _is_app_copy(path)
 
 
 def remember_case(folder: Path) -> None:
     """この出力フォルダの配置を、複製を消す前の参照確認に使う。"""
+    cases = _read_cases()
+    if cases is None:
+        return
     root = originals_dir().parent
     root.mkdir(parents=True, exist_ok=True)
     registry = _registry_path()
-    cases = _read_cases()
-    if cases is None:
-        cases = []
     text = str(folder.resolve())
     if text in cases:
         return
@@ -81,7 +81,11 @@ def adopt_originals(folder: Path, layout: Layout) -> Layout:
                 continue
             if check_original(folder, stored) is not OriginalState.PRESENT:
                 continue
-            copied = copy_original(resolve_stored_path(folder, stored))
+            try:
+                copied = copy_original(resolve_stored_path(folder, stored))
+            except OSError:
+                # 権限で読めない原本は「無い」にしない。パスを残し、他の原本は複製する。
+                continue
             created.append(str(copied))
             mapping[stored] = str(copied)
     except Exception:
@@ -93,15 +97,14 @@ def adopt_originals(folder: Path, layout: Layout) -> Layout:
 
 
 def release_copies(stored_paths, *, live: tuple[str, ...] | list[str] = ()) -> None:
-    """他のカードや別案件の配置が参照していない複製だけを消す。"""
-    if _read_cases() is None and _registry_path().exists():
+    """他のカードや別案件の配置が参照していない、このアプリが作った複製だけを消す。"""
+    saved = _saved_references()
+    if saved is None:
         return
     live_keys = _keys(live)
-    root = originals_dir().resolve()
-    saved = _saved_references()
     for stored in stored_paths:
         path = _resolved_stored(None, stored)
-        if path is None or not _is_inside(path, root):
+        if path is None or not _is_app_copy(path):
             continue
         keys = _keys((stored, str(path)))
         if keys & live_keys or keys & saved:
@@ -109,7 +112,7 @@ def release_copies(stored_paths, *, live: tuple[str, ...] | list[str] = ()) -> N
         if path.is_file():
             path.unlink()
         parent = path.parent
-        if parent != root and parent.is_dir() and not any(parent.iterdir()):
+        if parent != originals_dir().resolve() and parent.is_dir() and not any(parent.iterdir()):
             parent.rmdir()
 
 
@@ -130,9 +133,12 @@ def _read_cases() -> list[str] | None:
     return list(raw)
 
 
-def _saved_references() -> set[str]:
+def _saved_references() -> set[str] | None:
+    """台帳か、どれかの配置が読めないときは None。そのときは複製を消さない。"""
     found: set[str] = set()
-    cases = _read_cases() or []
+    cases = _read_cases()
+    if cases is None:
+        return None
     for case in cases:
         folder = Path(case)
         layout_file = folder / OUTPUT_DIR_NAME / LAYOUT_NAME
@@ -141,26 +147,50 @@ def _saved_references() -> set[str]:
         try:
             raw = json.loads(layout_file.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError):
-            continue
-        cards = raw.get("cards") if isinstance(raw, dict) else None
+            return None
+        if not isinstance(raw, dict):
+            return None
+        cards = raw.get("cards")
         if not isinstance(cards, list):
-            continue
+            return None
         for card in cards:
-            slots = card.get("slots") if isinstance(card, dict) else None
+            if not isinstance(card, dict):
+                return None
+            slots = card.get("slots")
             if not isinstance(slots, list):
-                continue
+                return None
             for slot in slots:
-                files = slot.get("files") if isinstance(slot, dict) else None
-                if not isinstance(files, list):
+                if not isinstance(slot, dict):
+                    return None
+                files = slot.get("files")
+                if files is None:
                     continue
+                if not isinstance(files, list):
+                    return None
                 for item in files:
                     if not isinstance(item, str):
-                        continue
+                        return None
                     found.update(_keys((item,)))
                     resolved = _resolved_stored(folder, item)
                     if resolved is not None:
                         found.add(str(resolved))
     return found
+
+
+_APP_COPY_HEX = frozenset("0123456789abcdef")
+
+
+def _is_app_copy(path: Path) -> bool:
+    """このアプリが copy_original で作ったファイルだけ。uuid の1段下のファイル。"""
+    try:
+        relative = path.resolve().relative_to(originals_dir().resolve())
+    except (OSError, ValueError):
+        return False
+    parts = relative.parts
+    if len(parts) != 2:
+        return False
+    folder_name = parts[0]
+    return len(folder_name) == 32 and all(char in _APP_COPY_HEX for char in folder_name)
 
 
 def _resolved_stored(folder: Path | None, stored: str) -> Path | None:
@@ -172,14 +202,6 @@ def _resolved_stored(folder: Path | None, stored: str) -> Path | None:
         return path.resolve()
     except (OSError, ValueError):
         return None
-
-
-def _is_inside(path: Path, root: Path) -> bool:
-    try:
-        path.resolve().relative_to(root.resolve())
-    except (OSError, ValueError):
-        return False
-    return True
 
 
 def _keys(paths) -> set[str]:

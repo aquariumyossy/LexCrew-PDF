@@ -191,7 +191,7 @@ def test_excluded_middle_pages_are_not_merged_and_do_not_renumber(tmp_path, monk
     assert view["mergedFilename"] == "甲001-1~3 一.pdf"
     assert view["mergeWarning"] == ""
 
-    def fake_write(folder, jobs, *, last_written, preserve=(), grayscale=False, style=None, page_numbers=False, stamp_enabled=True, fit_stamp=False):
+    def fake_write(folder, jobs, *, last_written, preserve=(), reserved=(), grayscale=False, style=None, page_numbers=False, stamp_enabled=True, fit_stamp=False):
         return {
             "written": [{"filename": job.filename} for job in jobs],
             "errors": [],
@@ -825,10 +825,14 @@ def test_emptied_first_branch_title_is_not_the_merged_filename(tmp_path, monkeyp
     _stored(session, 1, 0, 0).unlink()
     view = session.view()["cards"][0]
     assert view["slots"][0]["files"] == []
-    assert view["slots"][0]["filename"] == "甲001-2~3 領収.pdf"
-    assert view["mergedFilename"] == "甲001-2~3 領収.pdf"
-    assert "売買契約書" not in view["mergedFilename"]
-    assert all("売買契約書" not in slot["filename"] for slot in view["slots"])
+    assert view["mergedFilename"] == ""
+    assert view["mergeWarning"] == ""
+    assert all(slot["outputNote"] == "" for slot in view["slots"])
+    assert [slot["filename"] for slot in view["slots"]] == [
+        "甲001-1 売買契約書.pdf",
+        "甲001-2 領収.pdf",
+        "甲001-3 納品.pdf",
+    ]
     built = jobs_from_layout(session.layout, tmp_path)
     assert built.jobs == ()
     monkeypatch.setattr("lexcrew_pdf.write.require_stamp_font", lambda *args, **kwargs: None)
@@ -858,7 +862,8 @@ def test_missing_notice_follows_the_slot_and_stays_with_other_warnings(tmp_path,
     view = session.view()["cards"][0]
     assert "原本が見つかりません：無い付属.pdf" in view["message"]
     assert "出すページが無い" in view["message"]
-    assert "にPDFが無い" in view["mergeWarning"]
+    assert view["mergeWarning"] == ""
+    assert all("含めて出力" not in slot["outputNote"] for slot in view["slots"])
     session.add_file(1, 0, str(extra))
     held = session.view()["cards"][0]
     assert "原本が見つかりません：無い付属.pdf" in held["message"]
@@ -868,7 +873,8 @@ def test_missing_notice_follows_the_slot_and_stays_with_other_warnings(tmp_path,
     generated = session.generate()
     card = generated["cards"][0]
     assert "原本が見つかりません：無い付属.pdf" in card["message"]
-    assert "にPDFが無い" in card["mergeWarning"]
+    assert card["mergeWarning"] == ""
+    assert all("含めて出力" not in slot["outputNote"] for slot in card["slots"])
     moved = session.move_slot(1, 1)
     by_number = {item["number"]: item for item in moved["cards"]}
     assert "原本が見つかりません：無い付属.pdf" in by_number[7]["message"]
@@ -1053,6 +1059,31 @@ def test_remaining_branch_is_written_and_excluded_pages_stay_out(tmp_path, monke
     assert [item["name"] for item in card["slots"][1]["files"]] == ["残す.pdf"]
     assert result["ok"] is False
     assert "削除したファイル" not in result["message"]
+
+
+def test_missing_exhibit_does_not_show_merge_inclusion(tmp_path):
+    first = tmp_path / "売買.pdf"
+    second = tmp_path / "領収.pdf"
+    third = tmp_path / "納品.pdf"
+    _pdf(first)
+    _pdf(second)
+    _pdf(third)
+    session = Session(tmp_path)
+    session.add_file(1, 0, str(first))
+    session.add_branch(1)
+    session.add_file(1, 1, str(second))
+    session.add_branch(1)
+    session.add_file(1, 2, str(third))
+    session.set_title(1, "売買契約書", 0)
+    _stored(session, 1, 0, 0).unlink()
+    view = session.view()["cards"][0]
+    assert view["mergedFilename"] == ""
+    assert view["mergeWarning"] == ""
+    assert all(slot["outputNote"] == "" for slot in view["slots"])
+    assert "含めて出力" not in json.dumps(view, ensure_ascii=False)
+    built = jobs_from_layout(session.layout, tmp_path)
+    assert built.jobs == ()
+    assert list((tmp_path / "LexCrew-PDF-Downloads").glob("*.pdf")) == []
 
 
 def test_old_layout_without_stamp_enabled_keeps_the_stamp_on():

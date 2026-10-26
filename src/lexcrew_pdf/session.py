@@ -561,7 +561,14 @@ class Session:
         masks = _drop_sources(card.masks, start, old_count, len(copied))
         trims = _drop_sources(card.trims, start, old_count, len(copied))
         skews = _drop_sources(card.skews, start, old_count, len(copied))
-        self._put(_replace(card, slots=tuple(slots), pages=None, masks=masks, trims=trims, skews=skews))
+        self._put(_replace(
+            card,
+            slots=tuple(slots),
+            pages=_drop_pages(card.pages, start, old_count, len(copied)),
+            masks=masks,
+            trims=trims,
+            skews=skews,
+        ))
         self._release(old)
         return self.view()
 
@@ -588,24 +595,39 @@ class Session:
         """枝番カードの編集は、その枝番の出すページと、その原本の除くページだけ。"""
         card = self._card(number)
         _check_slot(card, slot_index)
-        natural, files_per_slot = self._natural(card)
-        buckets = _resolved(card, natural, files_per_slot)
-        group = slot_index + 1
-        start, end = _slot_source_span(files_per_slot, slot_index)
-        shown = list(buckets.get(group) or [])
-        hidden = [ref for ref in buckets.get(0) or [] if start <= ref[0] < end]
-        tilt = card.slots[slot_index].rotation
-        boxes = _image_boxes(self._paths(card), shown + hidden, tilt)
-        return {
-            "number": number,
-            "slot": slot_index,
-            "masks": _project_masks(
+        try:
+            natural, files_per_slot = self._natural(card)
+            buckets = _resolved(card, natural, files_per_slot)
+            group = slot_index + 1
+            start, end = _slot_source_span(files_per_slot, slot_index)
+            shown = list(buckets.get(group) or [])
+            hidden = [ref for ref in buckets.get(0) or [] if start <= ref[0] < end]
+            tilt = card.slots[slot_index].rotation
+            boxes = _image_boxes(self._paths(card), shown + hidden, tilt)
+            masks = _project_masks(
                 self._paths(card),
                 card.masks,
                 shown,
                 tilt,
                 card.skews,
-            ),
+            )
+        except ValueError as exc:
+            text = str(exc)
+            if "/" not in text and "\\" not in text and "Errno" not in text:
+                raise
+            names = tuple(
+                stored_file_name(stored) for slot in card.slots for stored in slot.files
+            )
+            raise ValueError(unreadable_original_message(names)) from None
+        except Exception:
+            names = tuple(
+                stored_file_name(stored) for slot in card.slots for stored in slot.files
+            )
+            raise ValueError(unreadable_original_message(names)) from None
+        return {
+            "number": number,
+            "slot": slot_index,
+            "masks": masks,
             "columns": [
                 {
                     "group": group,
@@ -1101,6 +1123,7 @@ class Session:
                 built.jobs,
                 last_written=last_written,
                 preserve=preserve,
+                reserved=built.preserve,
                 grayscale=grayscale,
                 style=style,
                 page_numbers=page_numbers,
@@ -1166,19 +1189,28 @@ class Session:
         }
 
     def _card_view(self, card: Card, book: FilenameBook) -> dict:
-        from .plan import file_merge_choice
+        from .plan import MergeChoice, file_merge_choice
 
         slot_count = len(card.slots)
         shown = self._shown(card.number)
         states, skip = self._presence(card)
-        choice = file_merge_choice(
-            self.layout.label_template,
-            card,
-            self.layout.merge_branches,
-            shown,
-            book=book,
-            skip=skip,
+
+        unusable = any(
+            state is OriginalState.MISSING or state is OriginalState.UNREADABLE
+            for slot_states in states
+            for state in slot_states
         )
+        if unusable:
+            choice = MergeChoice()
+        else:
+            choice = file_merge_choice(
+                self.layout.label_template,
+                card,
+                self.layout.merge_branches,
+                shown,
+                book=book,
+                skip=skip,
+            )
         slots = []
         for index, slot in enumerate(card.slots):
             included = index in choice.included
@@ -1187,7 +1219,11 @@ class Session:
             for file_index, (stored, state) in enumerate(zip(slot.files, states[index])):
                 if state is OriginalState.MISSING:
                     continue
-                visible.append({"index": file_index, "name": stored_file_name(stored), "stored": stored})
+                visible.append({
+                    "index": file_index,
+                    "name": stored_file_name(stored),
+                    "stored": stored_file_name(stored),
+                })
             slots.append({
                 "index": index,
                 "label": display_label(self.layout.label_template, shown, index, slot_count),

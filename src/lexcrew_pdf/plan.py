@@ -28,7 +28,7 @@ from .names import (
     title_only_filename,
 )
 from .pages import GROUP_PRIMARY, resolve_buckets
-from .stamp import inspect_source_pages, open_source
+from .stamp import inspect_source_pages, source_is_unusable
 
 
 @dataclass(frozen=True)
@@ -154,27 +154,29 @@ def generation_blockers(layout: Layout, folder: Path) -> tuple[tuple[int, tuple[
     """
     found: list[tuple[int, tuple[str, ...]]] = []
     for card in layout.cards:
-        names = tuple(stored_file_name(stored) for stored in _unusable_stored(folder, _flat_files(card)))
+        names = tuple(
+            stored_file_name(stored)
+            for stored in _unusable_stored(folder, _flat_files(card), fresh=True)
+        )
         if names:
             found.append((card.number, names))
     return tuple(found)
 
 
-def _unusable_stored(folder: Path, stored_files) -> tuple[str, ...]:
+def _unusable_stored(folder: Path, stored_files, *, fresh: bool = False) -> tuple[str, ...]:
     bad: list[str] = []
     for stored in stored_files:
         state = check_original(folder, stored)
         if state is not OriginalState.PRESENT:
             bad.append(stored)
             continue
-        document = None
         try:
-            document = open_source(str(resolve_stored_path(folder, stored)))
-        except Exception:
+            path = resolve_stored_path(folder, stored)
+        except ValueError:
             bad.append(stored)
-        finally:
-            if document is not None:
-                document.close()
+            continue
+        if source_is_unusable(str(path), fresh=fresh):
+            bad.append(stored)
     return tuple(bad)
 
 

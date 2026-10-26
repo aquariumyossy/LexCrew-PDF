@@ -525,17 +525,17 @@ def test_generation_reports_a_vanished_original_and_skips_the_partial_pdf(tmp_pa
     opened = []
     import lexcrew_pdf.stamp as stamp
 
-    real_open = stamp.open_source
+    real_probe = stamp.source_is_unusable
 
-    def spy(path):
+    def spy(path, *, fresh=False):
         name = Path(path).name
         opened.append(name)
         if name in {"消えた契約書.pdf", "無い付属.pdf"}:
             raise AssertionError(path)
-        return real_open(path)
+        return real_probe(path, fresh=fresh)
 
-    monkeypatch.setattr(stamp, "open_source", spy)
-    monkeypatch.setattr("lexcrew_pdf.plan.open_source", spy)
+    monkeypatch.setattr(stamp, "source_is_unusable", spy)
+    monkeypatch.setattr("lexcrew_pdf.plan.source_is_unusable", spy)
     preview = session.preview_generate()
     assert preview["replace"] == []
     assert preview["delete"] == []
@@ -559,7 +559,10 @@ def test_generation_reports_a_vanished_original_and_skips_the_partial_pdf(tmp_pa
     assert first["hasFile"] is False
     assert first["slots"][0]["files"] == []
     assert first["message"] == "原本が見つかりません：消えた契約書.pdf"
-    assert [item["name"] for item in second["slots"][0]["files"]] == ["残す.pdf"]
+    names = [item["name"] for item in second["slots"][0]["files"]]
+    assert names == ["無い付属.pdf", "残す.pdf"]
+    assert second["slots"][0]["files"][0]["missing"] is True
+    assert "missing" not in second["slots"][0]["files"][1]
     mixed = Api(session).media(2)
     assert mixed["ok"] is False
     assert mixed["message"] == "原本が見つかりません：無い付属.pdf"

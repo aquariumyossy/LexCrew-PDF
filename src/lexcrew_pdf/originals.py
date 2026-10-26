@@ -1,6 +1,7 @@
 """原本の複製。カードはここを読み、元のファイルを動かしても壊れない。"""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -84,8 +85,13 @@ def adopt_originals(folder: Path, layout: Layout) -> Layout:
                 continue
             if check_original(folder, stored) is not OriginalState.PRESENT:
                 continue
+            source = resolve_stored_path(folder, stored)
+            reused = _reusable_copy(source)
+            if reused is not None:
+                mapping[stored] = str(reused)
+                continue
             try:
-                copied = copy_original(resolve_stored_path(folder, stored))
+                copied = copy_original(source)
             except OSError:
                 # 権限で読めない原本は「無い」にしない。パスを残し、他の原本は複製する。
                 continue
@@ -99,11 +105,15 @@ def adopt_originals(folder: Path, layout: Layout) -> Layout:
     return _map_stored(layout, mapping)
 
 
-def release_copies(stored_paths, *, live: tuple[str, ...] | list[str] = ()) -> None:
-    """他のカードや別案件の配置が参照していない、このアプリが作った複製だけを消す。"""
+def release_copies(stored_paths, *, live: tuple[str, ...] | list[str] = ()) -> tuple[str, ...]:
+    """他のカードや別案件の配置が参照していない、このアプリが作った複製だけを消す。
+
+    消せなかったファイル名を返す。例外は上げない。パスは返さない。
+    """
+    failed: list[str] = []
     saved = _saved_references()
     if saved is None:
-        return
+        return ()
     live_keys = _keys(live)
     for stored in stored_paths:
         path = _resolved_stored(None, stored)
@@ -115,12 +125,54 @@ def release_copies(stored_paths, *, live: tuple[str, ...] | list[str] = ()) -> N
         try:
             exists = path.is_file()
         except OSError:
-            return
+            failed.append(path.name)
+            continue
         if exists:
-            path.unlink()
+            try:
+                path.unlink()
+            except OSError:
+                failed.append(path.name)
+                continue
         parent = path.parent
-        if parent != originals_dir().resolve() and parent.is_dir() and not any(parent.iterdir()):
-            parent.rmdir()
+        try:
+            if parent != originals_dir().resolve() and parent.is_dir() and not any(parent.iterdir()):
+                parent.rmdir()
+        except OSError:
+            pass
+    return tuple(failed)
+
+
+def _reusable_copy(source: Path) -> Path | None:
+    """同じ中身の複製がすでにあれば、それを返す。読めないときは None。"""
+    root = originals_dir()
+    try:
+        if not root.is_dir():
+            return None
+        size = source.stat().st_size
+        digest = _file_digest(source)
+        children = list(root.iterdir())
+    except OSError:
+        return None
+    for child in children:
+        candidate = child / source.name
+        if not _is_app_copy(candidate):
+            continue
+        try:
+            if not candidate.is_file() or candidate.stat().st_size != size:
+                continue
+            if _file_digest(candidate) == digest:
+                return candidate.resolve()
+        except OSError:
+            continue
+    return None
+
+
+def _file_digest(path: Path) -> bytes:
+    hasher = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    return hasher.digest()
 
 
 def _registry_path() -> Path:

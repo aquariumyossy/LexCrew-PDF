@@ -44,20 +44,27 @@ def write_jobs(
     written: list[dict] = []
     errors: list[dict] = []
     replaced: list[str] = []
-    failed = set(preserve)
     owned = set(last_written)
+    rendered: list[tuple[OutputJob, bytes]] = []
     for job in jobs:
         _checked_output_path(dest, job.filename)
         target = dest / job.filename
-        if target.is_file() and job.filename not in owned:
-            failed.add(job.filename)
+        try:
+            exists = target.is_file()
+        except OSError as exc:
+            errors.append({
+                "filename": job.filename,
+                "stampLabel": job.stamp,
+                "message": _short_error(exc),
+            })
+            continue
+        if exists and job.filename not in owned:
             errors.append({
                 "filename": job.filename,
                 "stampLabel": job.stamp,
                 "message": "同じ名前のファイルがあるため、書けませんでした。",
             })
             continue
-        tmp: Path | None = None
         try:
             data = stamp_sources_to_pdf(
                 job.sources,
@@ -77,11 +84,34 @@ def write_jobs(
                 draw_stamp=stamp_enabled,
                 fit_stamp=fit_stamp,
             )
-            dest.mkdir(parents=True, exist_ok=True)
+        except StampFontMissing:
+            raise
+        except Exception as exc:
+            errors.append({
+                "filename": job.filename,
+                "stampLabel": job.stamp,
+                "message": _short_error(exc),
+            })
+            continue
+        rendered.append((job, data))
+    # 一つでも失敗したら、置き換えも削除もしない。前回の証拠 PDF を残す。
+    if errors:
+        return {
+            "written": [],
+            "errors": errors,
+            "keep": tuple(last_written),
+            "replaced": (),
+            "deleted": (),
+        }
+    staged: list[tuple[OutputJob, Path, Path, bool]] = []
+    try:
+        dest.mkdir(parents=True, exist_ok=True)
+        for job, data in rendered:
             target = _checked_output_path(dest, job.filename)
-            replacing = target.is_file()
             tmp = dest / f"{job.filename}.writing"
             tmp.write_bytes(data)
+            staged.append((job, target, tmp, target.is_file()))
+        for job, target, tmp, replacing in staged:
             os.replace(tmp, target)
             if replacing:
                 replaced.append(job.filename)
@@ -89,22 +119,10 @@ def write_jobs(
                 "filename": job.filename,
                 "stampLabel": job.stamp,
             })
-        except StampFontMissing:
-            raise
-        except Exception as exc:
-            failed.add(job.filename)
-            errors.append({
-                "filename": job.filename,
-                "stampLabel": job.stamp,
-                "message": _short_error(exc),
-            })
-        finally:
-            if tmp is not None:
-                tmp.unlink(missing_ok=True)
-    keep = {row["filename"] for row in written} | failed
-    # 一つでも書けなかった生成は、名前が変わっていても前回の証拠 PDF を消さない。
-    if errors:
-        keep |= set(last_written)
+    finally:
+        for _job, _target, tmp, _replacing in staged:
+            tmp.unlink(missing_ok=True)
+    keep = {row["filename"] for row in written} | set(preserve)
     deleted = _delete_stale(dest, last_written, keep)
     return {
         "written": written,
@@ -181,7 +199,18 @@ def _delete_stale(dest: Path, last_written, keep: set[str]) -> list[str]:
 
 
 def _short_error(exc: Exception) -> str:
-    detail = str(exc).strip().replace("\n", " ")
+    from .layout import missing_original_message, unreadable_original_message
+
+    filename = getattr(exc, "filename", None)
+    name = Path(str(filename)).name if filename else ""
+    if isinstance(exc, FileNotFoundError):
+        return missing_original_message((name,)) if name else "原本が見つかりません："
+    text = str(exc)
+    if name and (isinstance(exc, OSError) or "/" in text or "\\" in text or "Errno" in text):
+        return unreadable_original_message((name,))
+    if "/" in text or "\\" in text or "Errno" in text:
+        return "原本を開けません。"
+    detail = text.strip().replace("\n", " ")
     if len(detail) > 180:
         detail = detail[:180]
     return detail or "保存できませんでした。"

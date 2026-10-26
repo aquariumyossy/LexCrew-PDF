@@ -342,6 +342,52 @@ def _chosen_style(style: StampStyle | None) -> StampStyle:
 _IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png"}
 
 
+_probe_cache: dict[tuple, bool] = {}
+
+
+def source_is_unusable(path: str, *, fresh: bool = False) -> bool:
+    """原本として使えないか。ファイル全体はメモリへ読まない。
+
+    fresh のときは、大きさや更新時刻が同じでも開き直す。一覧は同じ結果を再利用する。
+    """
+    file_path = Path(path)
+    try:
+        info = file_path.stat()
+        key = (str(file_path.resolve()), info.st_size, getattr(info, "st_mtime_ns", info.st_mtime))
+    except OSError:
+        return True
+    if not fresh and key in _probe_cache:
+        return _probe_cache[key]
+    bad = _probe_source(file_path)
+    _probe_cache[key] = bad
+    return bad
+
+
+def _probe_source(file_path: Path) -> bool:
+    """開けない、暗号、0ページは使えない。中身の描画はしない。"""
+    document = None
+    try:
+        document = fitz.open(file_path)
+        if getattr(document, "needs_pass", 0):
+            try:
+                opened = document.authenticate("")
+            except Exception:
+                opened = 0
+            if not opened:
+                return True
+        if document.page_count < 1:
+            return True
+        page = document[0]
+        if float(page.rect.width) < 1 or float(page.rect.height) < 1:
+            return True
+        return False
+    except Exception:
+        return True
+    finally:
+        if document is not None:
+            document.close()
+
+
 def open_source(path: str):
     """原本はメモリへ読んでから開く。ファイルを掴んだままだと、同じPDFを再度選べない。
 

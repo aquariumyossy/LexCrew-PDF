@@ -68,9 +68,14 @@ def test_one_corrupt_file_does_not_stop_the_other(tmp_path):
     previous.write_bytes(b"%PDF-old")
     bad = OutputJob(2, (str(bad_path),), "甲第２号証", "甲002：契約.pdf", 0, False, None)
     result = write_jobs(tmp_path, (good, bad), last_written=("甲002：契約.pdf",))
-    assert (tmp_path / "LexCrew-PDF-Downloads" / "甲001：契約.pdf").is_file()
+    dest = tmp_path / "LexCrew-PDF-Downloads"
+    assert not (dest / "甲001：契約.pdf").exists()
     assert previous.read_bytes() == b"%PDF-old"
+    assert result["written"] == []
+    assert result["deleted"] == ()
     assert len(result["errors"]) == 1
+    assert str(bad_path) not in result["errors"][0]["message"]
+    assert "Errno" not in result["errors"][0]["message"]
 
 
 def test_names_missing_from_last_written_are_deleted(tmp_path):

@@ -119,8 +119,9 @@ function cardLocked(card) {
 
 function slotCard(card, slot, isLast) {
   const article = document.createElement("article");
-  const locked = cardLocked(card);
-  article.className = locked ? "evidence-card is-locked" : "evidence-card";
+  const editing = cardLocked(card);
+  const locked = editing || generating;
+  article.className = editing ? "evidence-card is-locked" : "evidence-card";
   article.dataset.number = String(card.number);
   article.dataset.slot = String(slot.index);
   const filled = slot.files.length > 0;
@@ -181,9 +182,12 @@ function slotCard(card, slot, isLast) {
   if (filled) {
     for (const file of slot.files) {
       const source = document.createElement("div");
-      source.className = "evidence-source";
+      source.className = file.missing ? "evidence-source is-missing" : "evidence-source";
       source.textContent = `原本: ${file.name}`;
       if (!locked) rememberDrop(source, card.number, slot.index, file.index);
+      if (file.missing && !locked) {
+        source.appendChild(miniButton("外す", () => api.remove_file(card.number, slot.index, file.index).then(applyView)));
+      }
       meta.appendChild(source);
     }
     const pages = document.createElement("div");
@@ -226,7 +230,7 @@ function slotCard(card, slot, isLast) {
     freezeActions(actions, locked);
     meta.appendChild(actions);
   }
-  if (locked) {
+  if (editing) {
     const badge = document.createElement("div");
     badge.className = "evidence-lock";
     badge.textContent = "編集中";
@@ -584,17 +588,20 @@ document.getElementById("clear").addEventListener("click", async () => {
 document.getElementById("generate").addEventListener("click", async () => {
   if (!api || generating) return;
   generating = true;
-  const button = document.getElementById("generate");
-  button.disabled = true;
+  if (view) render();
   try {
     const preview = await api.preview_generate();
     if (!confirmGenerate(preview)) return;
-    const result = await api.generate();
+    let result = await api.generate(preview);
+    if (result && result.needsConfirm) {
+      if (!confirmGenerate(result)) return;
+      result = await api.generate(result);
+    }
     if (result && result.message) showBanner(result.message);
     applyView(result);
   } finally {
     generating = false;
-    button.disabled = false;
+    if (view) render();
   }
 });
 

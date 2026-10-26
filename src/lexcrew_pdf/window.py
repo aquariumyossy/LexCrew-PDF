@@ -264,6 +264,9 @@ class Api:
     def add_branch(self, number: int) -> dict:
         return self._run(lambda: self.session.add_branch(int(number)))
 
+    def remove_file(self, number: int, slot_index: int, file_index: int) -> dict:
+        return self._run(lambda: self.session.remove_file(int(number), int(slot_index), int(file_index)))
+
     def delete_slot(self, number: int, slot_index: int) -> dict:
         before = self.session.editor_identity()
         view = self._run(lambda: self.session.delete_slot(int(number), int(slot_index)))
@@ -374,8 +377,15 @@ class Api:
     def preview_generate(self) -> dict:
         return self._run(self.session.preview_generate)
 
-    def generate(self) -> dict:
-        result = self._run(self.session.generate)
+    def generate(self, expected=None) -> dict:
+        try:
+            preview = self.session.preview_generate()
+            pending = bool(preview.get("replace") or preview.get("delete") or preview.get("keep"))
+            if pending and _preview_token(preview) != _preview_token(expected):
+                return {"ok": False, "needsConfirm": True, "written": [], **preview}
+            result = self.session.generate()
+        except Exception as exc:
+            return {**self.session.view(), "ok": False, "message": _editor_error(exc)}
         written = result.get("written") or ()
         output = result.get("outputDir") or ""
         if written and output:
@@ -398,8 +408,8 @@ class Api:
     def _run(self, fn):
         try:
             return fn()
-        except ValueError as exc:
-            return {**self.session.view(), "ok": False, "message": str(exc)}
+        except Exception as exc:
+            return {**self.session.view(), "ok": False, "message": _editor_error(exc)}
 
     def _save_on_close(self) -> None:
         self._closing = True
@@ -626,6 +636,20 @@ class EditorApi:
             return fn()
         except Exception as exc:
             return {"ok": False, "message": _editor_error(exc)}
+
+
+def _preview_token(preview) -> str:
+    if not isinstance(preview, dict):
+        return ""
+    keep = []
+    for row in preview.get("keep") or []:
+        if isinstance(row, dict):
+            keep.append((row.get("existing"), row.get("writing")))
+    return "\n".join([
+        "replace:" + "\n".join(preview.get("replace") or []),
+        "delete:" + "\n".join(preview.get("delete") or []),
+        "keep:" + "\n".join(f"{existing}=>{writing}" for existing, writing in keep),
+    ])
 
 
 def _editor_error(exc: BaseException) -> str:

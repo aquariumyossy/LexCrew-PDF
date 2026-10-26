@@ -483,7 +483,9 @@ def test_missing_first_number_is_one_and_bad_values_are_rejected():
             parse_layout({**raw, "firstNumber": bad})
 
 
-def test_generation_ignores_a_missing_original(tmp_path, monkeypatch):
+def test_generation_reports_a_vanished_original_and_skips_the_partial_pdf(tmp_path, monkeypatch):
+    from lexcrew_pdf.window import Api
+
     missing = tmp_path / "消えた契約書.pdf"
     also_missing = tmp_path / "無い付属.pdf"
     kept = tmp_path / "残す.pdf"
@@ -513,11 +515,13 @@ def test_generation_ignores_a_missing_original(tmp_path, monkeypatch):
 
     monkeypatch.setattr(stamp, "open_source", spy)
     built = jobs_from_layout(session.layout, tmp_path)
-    assert [job.number for job in built.jobs] == [2]
-    assert [Path(source).name for job in built.jobs for source in job.sources] == ["残す.pdf"]
-    assert built.errors == ()
+    assert built.jobs == ()
+    assert [row["number"] for row in built.errors] == [1, 2]
+    assert built.errors[0]["message"] == "原本が見つかりません：消えた契約書.pdf"
+    assert built.errors[1]["message"] == "原本が見つかりません：無い付属.pdf"
     assert "消えた契約書.pdf" not in opened
     assert "無い付属.pdf" not in opened
+    assert str(tmp_path) not in built.errors[0]["message"]
 
     written_sources = []
 
@@ -531,11 +535,24 @@ def test_generation_ignores_a_missing_original(tmp_path, monkeypatch):
     result = session.generate()
     assert "消えた契約書.pdf" not in opened
     assert "無い付属.pdf" not in opened
-    assert written_sources == [("残す.pdf",)]
-    assert result["ok"] is True
-    assert [row["filename"] for row in result["written"]] == ["甲002 残す.pdf"]
+    assert written_sources == []
+    assert result["ok"] is False
+    assert result["written"] == []
     assert "Errno 2" not in result["message"]
-    assert "原本を開けません" not in result["message"]
+    assert str(tmp_path) not in result["message"]
+    first = result["cards"][0]
+    second = result["cards"][1]
+    assert first["hasFile"] is False
+    assert first["slots"][0]["files"] == []
+    assert first["message"] == "原本が見つかりません：消えた契約書.pdf"
+    assert [item["name"] for item in second["slots"][0]["files"]] == ["残す.pdf"]
+    assert second["message"] == "原本が見つかりません：無い付属.pdf"
+    assert "残す.pdf" not in second["message"]
+    media = Api(session).media(1)
+    assert media["ok"] is False
+    assert media["message"] == "原本が見つかりません：消えた契約書.pdf"
+    assert str(tmp_path) not in media["message"]
+    assert "Errno" not in media["message"]
 
 
 def test_unreadable_file_keeps_the_shown_filename(tmp_path):
@@ -677,6 +694,137 @@ def test_template_without_n_mentions_the_branch_slot_when_a_gap_blocks_merge(tmp
         "2番目の枝番にPDFが無いため、まとめて出力しません。空の枝番を削除すると、残った枝番がまとまります。"
     )
     assert session.view()["cards"][0]["mergeWarning"] == built.warnings[0]["message"]
+
+
+def test_missing_primary_does_not_bring_excluded_pages_back(tmp_path):
+    from dataclasses import replace
+
+    from lexcrew_pdf.layout import PageRow, drop_missing_originals
+    from lexcrew_pdf.pages import GROUP_EXCLUDED, GROUP_PRIMARY, resolve_buckets
+
+    body = tmp_path / "本文.pdf"
+    cover = tmp_path / "送付状.pdf"
+    _pdf(body, "BODY")
+    _pdf(cover, "COVER")
+    session = Session(tmp_path)
+    session.add_file(1, 0, str(body))
+    session.add_file(1, 0, str(cover))
+    session._put(replace(
+        session.layout.cards[0],
+        pages=(
+            PageRow(source=0, page=0, part=0, group=1, position=0),
+            PageRow(source=1, page=0, part=0, group=0, position=1),
+        ),
+    ))
+    body.unlink()
+    assert [Path(item).name for item in session.layout.cards[0].slots[0].files] == ["本文.pdf", "送付状.pdf"]
+    cleaned, names = drop_missing_originals(tmp_path, session.layout.cards[0])
+    assert names == ("本文.pdf",)
+    assert cleaned.pages == (PageRow(source=0, page=0, part=0, group=0, position=0),)
+    rows = [{
+        "source_index": 0,
+        "page_index": 0,
+        "part": 0,
+        "group_index": cleaned.pages[0].group,
+        "position": 0,
+    }]
+    buckets = resolve_buckets([(0, 0, 0)], rows, [1], honor_exclusions=True)
+    assert buckets[GROUP_PRIMARY] == []
+    assert buckets[GROUP_EXCLUDED] == [(0, 0, 0)]
+    built = jobs_from_layout(session.layout, tmp_path)
+    for job in built.jobs:
+        names = [Path(source).name for source in job.sources]
+        assert names != ["送付状.pdf"]
+        if job.pages is None:
+            assert "送付状.pdf" not in names
+
+
+def test_failed_regeneration_keeps_the_previous_evidence_pdf(tmp_path, monkeypatch):
+    contract = tmp_path / "契約書.pdf"
+    extra = tmp_path / "別紙.pdf"
+    _pdf(contract, "A")
+    _pdf(extra, "B")
+    session = Session(tmp_path)
+    session.add_file(1, 0, str(contract))
+    session.add_file(1, 0, str(extra))
+    monkeypatch.setattr("lexcrew_pdf.write.require_stamp_font", lambda *args, **kwargs: None)
+    monkeypatch.setattr("lexcrew_pdf.write.stamp_sources_to_pdf", lambda *args, **kwargs: b"%PDF-1.4\n")
+    first = session.generate()
+    assert first["ok"] is True
+    assert [row["filename"] for row in first["written"]] == ["甲001 契約書.pdf"]
+    output = tmp_path / "LexCrew-PDF-Downloads" / "甲001 契約書.pdf"
+    assert output.is_file()
+    previous = output.read_bytes()
+    contract.unlink()
+    extra.write_bytes(b"not a pdf")
+    second = session.generate()
+    assert second["ok"] is False
+    assert output.is_file()
+    assert output.read_bytes() == previous
+    assert "削除したファイル: 甲001 契約書.pdf" not in second["message"]
+
+
+def test_emptied_first_branch_title_is_not_the_merged_filename(tmp_path):
+    sale = tmp_path / "売買.pdf"
+    receipt = tmp_path / "領収.pdf"
+    delivery = tmp_path / "納品.pdf"
+    _pdf(sale)
+    _pdf(receipt)
+    _pdf(delivery)
+    session = Session(tmp_path)
+    session.add_file(1, 0, str(sale))
+    session.add_branch(1)
+    session.add_file(1, 1, str(receipt))
+    session.add_branch(1)
+    session.add_file(1, 2, str(delivery))
+    session.set_title(1, "売買契約書", 0)
+    sale.unlink()
+    view = session.view()["cards"][0]
+    assert view["slots"][0]["files"] == []
+    assert view["slots"][0]["filename"] == "甲001-2~3 領収.pdf"
+    assert view["mergedFilename"] == "甲001-2~3 領収.pdf"
+    assert "売買契約書" not in view["mergedFilename"]
+    assert all("売買契約書" not in slot["filename"] for slot in view["slots"])
+    built = jobs_from_layout(session.layout, tmp_path)
+    assert all("売買契約書" not in job.filename for job in built.jobs)
+
+
+def test_missing_notice_follows_the_slot_and_stays_with_other_warnings(tmp_path, monkeypatch):
+    present = tmp_path / "本文.pdf"
+    missing = tmp_path / "無い付属.pdf"
+    tail = tmp_path / "末尾.pdf"
+    extra = tmp_path / "追加.pdf"
+    for path in (present, missing, tail, extra):
+        _pdf(path)
+    session = Session(tmp_path)
+    session.add_file(1, 0, str(present))
+    session.add_branch(1)
+    session.add_file(1, 1, str(missing))
+    session.add_branch(1)
+    session.add_file(1, 2, str(tail))
+    missing.unlink()
+    session.card_errors[1] = "甲第１号証の２に出すページが無いため、まとめて出力しません。"
+    view = session.view()["cards"][0]
+    assert "原本が見つかりません：無い付属.pdf" in view["message"]
+    assert "出すページが無い" in view["message"]
+    assert "にPDFが無い" in view["mergeWarning"]
+    session.add_file(1, 0, str(extra))
+    held = session.view()["cards"][0]
+    assert "原本が見つかりません：無い付属.pdf" in held["message"]
+    assert "出すページが無い" in held["message"]
+    monkeypatch.setattr("lexcrew_pdf.write.require_stamp_font", lambda *args, **kwargs: None)
+    monkeypatch.setattr("lexcrew_pdf.write.stamp_sources_to_pdf", lambda *args, **kwargs: b"%PDF-1.4\n")
+    generated = session.generate()
+    card = generated["cards"][0]
+    assert "原本が見つかりません：無い付属.pdf" in card["message"]
+    assert "にPDFが無い" in card["mergeWarning"]
+    moved = session.move_slot(1, 1)
+    by_number = {item["number"]: item for item in moved["cards"]}
+    assert "原本が見つかりません：無い付属.pdf" in by_number[7]["message"]
+    assert "出すページが無い" not in by_number[7]["message"]
+    assert "原本が見つかりません" not in by_number[1]["message"]
+    assert by_number[7]["hasFile"] is False
+    assert by_number[7]["slots"][0]["files"] == []
 
 
 def test_old_layout_without_stamp_enabled_keeps_the_stamp_on():

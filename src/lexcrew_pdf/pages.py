@@ -45,13 +45,21 @@ def resolve_buckets(
     natural: list[PageRef],
     rows: list[dict],
     files_per_slot: list[int],
+    *,
+    honor_exclusions: bool = False,
 ) -> dict[int, list[PageRef]]:
-    """本体が空の指定は無視して、原本の並びに戻す。"""
+    """本体が空の指定は無視して、原本の並びに戻す。
+
+    原本が消えて残ったのが除いたページだけのときは、honor_exclusions で
+    そのページを出さない。全ページを除いただけの指定は、これまで通り戻す。
+    """
     max_group = max(1, len(files_per_slot))
     if not rows:
         return natural_buckets(natural, files_per_slot)
     buckets = arrange_pages(natural, rows, max_group=max_group)
     if not buckets[GROUP_PRIMARY]:
+        if honor_exclusions and buckets.get(GROUP_EXCLUDED):
+            return buckets
         return natural_buckets(natural, files_per_slot)
     return buckets
 

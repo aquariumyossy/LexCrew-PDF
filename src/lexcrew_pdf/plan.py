@@ -4,7 +4,18 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from .layout import Card, Layout, PageRow, Slot, drop_missing_originals, resolve_stored_path
+from .layout import (
+    Card,
+    Layout,
+    OriginalState,
+    PageRow,
+    Slot,
+    check_original,
+    missing_original_message,
+    resolve_stored_path,
+    stored_file_name,
+    unreadable_original_message,
+)
 from .names import (
     FilenameBook,
     branch_number,
@@ -87,8 +98,6 @@ def jobs_from_layout(layout: Layout, folder: Path) -> PlanBuild:
         blocked=foreign_output_names(folder, layout.last_written),
     )
     for card in layout.cards:
-        # 起動時と同じく、原本が無いファイルは開かず、生成にも載せない。
-        card, _missing = drop_missing_originals(folder, card)
         built, card_errors, card_preserve, card_warnings = _jobs_for_card(
             layout.label_template,
             card,
@@ -150,21 +159,40 @@ def _jobs_for_card(
     flat = _flat_files(card)
     if not flat:
         return [], [], [], []
-    resolved = tuple(str(resolve_stored_path(folder, stored)) for stored in flat)
+    states = [check_original(folder, stored) for stored in flat]
+    missing_names = tuple(
+        stored_file_name(stored) for stored, state in zip(flat, states) if state is OriginalState.MISSING
+    )
+    blocked_names = tuple(
+        stored_file_name(stored) for stored, state in zip(flat, states) if state is OriginalState.UNREADABLE
+    )
     files_per_slot = [len(slot.files) for slot in card.slots]
+
+    def preserve_names() -> list[str]:
+        # 前回の出力名は、欠落を外す前のカードから決める。
+        return _fallback_names(
+            series, card, files_per_slot, merge_branches=merge_branches, shown=shown, book=book,
+        )
+
+    if missing_names or blocked_names:
+        # 欠けた号証は、残った原本だけでは出さない。
+        errors = []
+        if missing_names:
+            errors.append(_card_error(card, missing_original_message(missing_names)))
+        if blocked_names:
+            errors.append(_card_error(card, unreadable_original_message(blocked_names)))
+        return [], errors, preserve_names(), []
+    resolved = tuple(str(resolve_stored_path(folder, stored)) for stored in flat)
     try:
         tilts = [slot.rotation for slot in card.slots for _stored in slot.files]
         _raw, _expanded, _splittable, natural, _spreads = inspect_source_pages(
             resolved, split=card.split_a4, tilts=tilts,
         )
-    except Exception as exc:
-        return [], [_card_error(card, f"原本を開けません。{exc}")], _fallback_names(
-            series, card, files_per_slot, merge_branches=merge_branches, shown=shown, book=book,
-        ), []
+    except Exception:
+        names = tuple(stored_file_name(stored) for stored in flat)
+        return [], [_card_error(card, unreadable_original_message(names))], preserve_names(), []
     if not natural:
-        return [], [_card_error(card, "ページがありません。")], _fallback_names(
-            series, card, files_per_slot, merge_branches=merge_branches, shown=shown, book=book,
-        ), []
+        return [], [_card_error(card, "ページがありません。")], preserve_names(), []
     rows = _page_rows(card.pages)
     buckets = resolve_buckets(list(natural), rows, files_per_slot)
     jobs: list[OutputJob] = []
@@ -257,21 +285,26 @@ def file_merge_choice(
     shown: int,
     *,
     book: FilenameBook | None = None,
+    skip: frozenset[int] = frozenset(),
 ) -> MergeChoice:
-    """ファイルのある枝番だけで合体を決める。原本は開かない。"""
+    """ファイルのある枝番だけで合体を決める。原本は開かない。
+
+    skip は原本が消えた枝番。空きとして扱い、その書名は合体名に使わない。
+    """
     if not merge_branches or len(card.slots) < 2:
         return MergeChoice()
-    filled = [index for index, slot in enumerate(card.slots) if slot.files]
+    judged = _card_without_slots(card, skip)
+    filled = [index for index, slot in enumerate(judged.slots) if slot.files]
     if len(filled) < 2:
         return MergeChoice()
     expected = list(range(filled[0], filled[-1] + 1))
     if filled != expected:
         missing = [index for index in expected if index not in set(filled)]
-        return MergeChoice(warning=branch_gap_warning(series, card, missing, shown))
+        return MergeChoice(warning=branch_gap_warning(series, judged, missing, shown))
     slot_count = len(card.slots)
     start = branch_number(filled[0], slot_count)
     end = branch_number(filled[-1], slot_count)
-    title = merged_document_title(card)
+    title = merged_document_title(card, skip)
     if book is not None:
         filename = book.claim(shown, start, title, branch_end=end)
         token = book.token(shown, start, end, filename)
@@ -288,17 +321,29 @@ def file_merge_choice(
     )
 
 
-def merged_document_title(card: Card) -> str:
-    """まとめた PDF の書名。親（最初の枝番）の書名を優先し、空なら後の枝番へ落ちる。"""
-    first = card.slots[0]
-    title = document_title(first.title, first.files[0] if first.files else None)
-    if title:
-        return title
-    for slot in card.slots[1:]:
+def merged_document_title(card: Card, skip: frozenset[int] | set[int] = frozenset()) -> str:
+    """まとめた PDF の書名。親（最初の枝番）の書名を優先し、空なら後の枝番へ落ちる。
+
+    原本が消えた枝番は skip に入れ、その手入力の書名は使わない。
+    最初からファイルの無い枝番の書名は、これまで通り使う。
+    """
+    for index, slot in enumerate(card.slots):
+        if index in skip:
+            continue
         title = document_title(slot.title, slot.files[0] if slot.files else None)
         if title:
             return title
     return ""
+
+
+def _card_without_slots(card: Card, skip: frozenset[int] | set[int]) -> Card:
+    if not skip:
+        return card
+    slots = tuple(
+        replace(slot, files=()) if index in skip else slot
+        for index, slot in enumerate(card.slots)
+    )
+    return replace(card, slots=slots)
 
 
 def branch_gap_warning(series: str, card: Card, missing: list[int], shown: int) -> str:

@@ -341,8 +341,8 @@ class Api:
             return self.session.media(int(number))
         except ValueError as exc:
             return {"ok": False, "message": str(exc), "slots": []}
-        except OSError as exc:
-            return {"ok": False, "message": f"原本を開けません。{exc}", "slots": []}
+        except OSError:
+            return {"ok": False, "message": "原本を開けません。", "slots": []}
 
     def preview(self, number: int, slot_index: int, page_index: int, zoom: float = 1.15) -> dict:
         return self._run(lambda: self.session.preview(int(number), int(slot_index), int(page_index), float(zoom)))

@@ -26,18 +26,21 @@ from .layout import (
     Card,
     Layout,
     Mask,
+    OriginalState,
     PageRow,
     Skew,
     Slot,
     Trim,
     adopt_output_directory,
+    check_original,
     default_layout,
-    drop_missing_originals,
     is_missing_original_message,
     layout_path,
     load_layout,
     missing_original_message,
     require_source_file,
+    stored_file_name,
+    unreadable_original_message,
     save_layout,
     store_path,
     with_next_series,
@@ -248,25 +251,6 @@ class Session:
             return
         self.layout = loaded
         self.card_errors = {}
-        self._drop_missing_originals()
-
-    def _drop_missing_originals(self) -> None:
-        """起動時に、消えた原本をカードから外す。号証番号は残し、PDF は開かない。"""
-        if self.folder is None:
-            return
-        cards = []
-        notes: dict[int, str] = {}
-        changed = False
-        for card in self.layout.cards:
-            cleaned, names = drop_missing_originals(self.folder, card)
-            cards.append(cleaned)
-            if names:
-                changed = True
-                notes[card.number] = missing_original_message(names)
-        if not changed:
-            return
-        self.layout = self._with_cards(tuple(cards))
-        self.card_errors = notes
 
     @_locked
     def add_card(self) -> dict:
@@ -491,7 +475,6 @@ class Session:
         self._guard(int(number))
         card = self._card(number)
         stored = self._store(file_path)
-        self._clear_missing_original_note(int(number))
         slots = list(card.slots)
         slot = slots[slot_index]
         insert_at = sum(len(item.files) for item in slots[:slot_index]) + len(slot.files)
@@ -508,7 +491,6 @@ class Session:
         self._guard(int(number))
         card = self._card(number)
         stored = self._store(file_path)
-        self._clear_missing_original_note(int(number))
         slots = list(card.slots)
         files = list(slots[slot_index].files)
         files[file_index] = stored
@@ -527,7 +509,6 @@ class Session:
             return self.view()
         card = self._card(number)
         stored = tuple(self._store(path) for path in paths)
-        self._clear_missing_original_note(int(number))
         slots = list(card.slots)
         start = sum(len(item.files) for item in slots[:slot_index])
         old_count = len(slots[slot_index].files)
@@ -853,15 +834,34 @@ class Session:
             masks = card.masks
             trims = card.trims
             skews = card.skews
+            missing_names = []
+            blocked_names = []
+            for stored in (item for slot in card.slots for item in slot.files):
+                state = self._original_state(stored)
+                if state is OriginalState.MISSING:
+                    missing_names.append(stored_file_name(stored))
+                elif state is OriginalState.UNREADABLE:
+                    blocked_names.append(stored_file_name(stored))
+        if missing_names or blocked_names:
+            parts = []
+            if missing_names:
+                parts.append(missing_original_message(tuple(missing_names)))
+            if blocked_names:
+                parts.append(unreadable_original_message(tuple(blocked_names)))
+            return {"ok": False, "message": " ".join(parts), "slots": []}
         trim_map = trim_lookup(trims)
         skew_map = skew_lookup(skews)
         empty_slots = [{"index": index, "pageCount": 0, "thumb": ""} for index in range(len(counts))]
         if not paths:
             return {"number": ordinal, "pageCount": 0, "splittable": False, "thumb": "", "slots": empty_slots}
         tilts = [rotation for rotation, count in zip(rotations, counts) for _file in range(count)]
-        _raw, _expanded, splittable, natural, spreads = inspect_source_pages(
-            paths, split=split, tilts=tilts,
-        )
+        try:
+            _raw, _expanded, splittable, natural, spreads = inspect_source_pages(
+                paths, split=split, tilts=tilts,
+            )
+        except OSError:
+            names = tuple(stored_file_name(path) for path in paths)
+            return {"ok": False, "message": unreadable_original_message(names), "slots": []}
         buckets = resolve_buckets(list(natural), page_rows, counts)
         page_counts = [len(list(buckets.get(index + 1) or [])) for index in range(len(counts))]
         slots = []
@@ -1059,12 +1059,12 @@ class Session:
         except StampFontMissing as exc:
             return {"ok": False, **self.view(), "message": str(exc)}
         with self._lock:
-            notes = {
-                number: message
-                for number, message in self.card_errors.items()
-                if is_missing_original_message(message)
+            # 原本が無い案内はカード番号に紐づけない。表示は今のスロットから出す。
+            self.card_errors = {
+                row["number"]: row["message"]
+                for row in built.errors
+                if not is_missing_original_message(row["message"])
             }
-            self.card_errors = {row["number"]: row["message"] for row in built.errors}
             for row in result["errors"]:
                 number = _number_for_filename(built.jobs, row["filename"])
                 if number is not None:
@@ -1085,12 +1085,11 @@ class Session:
                     card,
                     self.layout.merge_branches,
                     self._shown(card.number),
+                    skip=self._merge_skip(card),
                 )
                 if structural.warning:
                     continue
                 self.card_errors[row["number"]] = row["message"]
-            for number, message in notes.items():
-                self.card_errors.setdefault(number, message)
             written = len(result["written"])
             failed = len(result["errors"]) + len(built.errors)
             if written and failed:
@@ -1120,17 +1119,24 @@ class Session:
 
         slot_count = len(card.slots)
         shown = self._shown(card.number)
+        states, skip = self._presence(card)
         choice = file_merge_choice(
             self.layout.label_template,
             card,
             self.layout.merge_branches,
             shown,
             book=book,
+            skip=skip,
         )
         slots = []
         for index, slot in enumerate(card.slots):
             included = index in choice.included
             filename = choice.filename if choice.filename and (index == 0 or included) else self._slot_filename(card, index, book)
+            visible = []
+            for file_index, (stored, state) in enumerate(zip(slot.files, states[index])):
+                if state is OriginalState.MISSING:
+                    continue
+                visible.append({"index": file_index, "name": stored_file_name(stored), "stored": stored})
             slots.append({
                 "index": index,
                 "label": display_label(self.layout.label_template, shown, index, slot_count),
@@ -1139,7 +1145,7 @@ class Session:
                 "title": slot.title,
                 "rotation": slot.rotation,
                 "outputNote": f"→ {choice.token} に含めて出力" if included else "",
-                "files": [{"index": file_index, "name": Path(stored).name, "stored": stored} for file_index, stored in enumerate(slot.files)],
+                "files": visible,
             })
         return {
             "number": card.number,
@@ -1148,10 +1154,10 @@ class Session:
             "rotation": card.slots[0].rotation,
             "splitA4": card.split_a4,
             "slots": slots,
-            "hasFile": any(slot.files for slot in card.slots),
+            "hasFile": any(slot["files"] for slot in slots),
             "mergedFilename": choice.filename,
             "mergeWarning": choice.warning,
-            "message": self.card_errors.get(card.number, ""),
+            "message": self._card_message(card, states),
         }
 
     def _slot_filename(self, card: Card, slot_index: int, book: FilenameBook) -> str:
@@ -1188,6 +1194,7 @@ class Session:
                 self.layout.merge_branches,
                 shown,
                 book=book,
+                skip=self._merge_skip(card),
             )
             for index, _slot in enumerate(card.slots):
                 included = index in choice.included
@@ -1225,10 +1232,44 @@ class Session:
     def _with_cards(self, cards: tuple[Card, ...]) -> Layout:
         return replace(self.layout, cards=cards)
 
-    def _clear_missing_original_note(self, number: int) -> None:
-        message = self.card_errors.get(number, "")
-        if is_missing_original_message(message):
-            del self.card_errors[number]
+    def _original_state(self, stored: str) -> OriginalState:
+        if self.folder is None:
+            return OriginalState.PRESENT
+        return check_original(self.folder, stored)
+
+    def _presence(self, card: Card) -> tuple[list[list[OriginalState]], frozenset[int]]:
+        states: list[list[OriginalState]] = []
+        skip: list[int] = []
+        for index, slot in enumerate(card.slots):
+            slot_states = [self._original_state(stored) for stored in slot.files]
+            states.append(slot_states)
+            if slot.files and all(state is OriginalState.MISSING for state in slot_states):
+                skip.append(index)
+        return states, frozenset(skip)
+
+    def _merge_skip(self, card: Card) -> frozenset[int]:
+        return self._presence(card)[1]
+
+    def _card_message(self, card: Card, states: list[list[OriginalState]]) -> str:
+        missing: list[str] = []
+        blocked: list[str] = []
+        for slot, slot_states in zip(card.slots, states):
+            for stored, state in zip(slot.files, slot_states):
+                if state is OriginalState.MISSING:
+                    missing.append(stored_file_name(stored))
+                elif state is OriginalState.UNREADABLE:
+                    blocked.append(stored_file_name(stored))
+        parts: list[str] = []
+        if missing:
+            parts.append(missing_original_message(tuple(missing)))
+        if blocked:
+            parts.append(unreadable_original_message(tuple(blocked)))
+        other = self.card_errors.get(card.number, "")
+        if not parts:
+            return other
+        if other and not is_missing_original_message(other) and other not in parts:
+            parts.append(other)
+        return " ".join(parts)
 
     def _persist(self) -> None:
         if self.folder is not None:

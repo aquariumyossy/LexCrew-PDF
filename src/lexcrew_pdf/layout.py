@@ -1,9 +1,14 @@
 """指定フォルダの配置。PDF はここでは開かない。"""
 from __future__ import annotations
 
+import errno
 import json
 import os
+import stat
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass, replace
+from enum import Enum
 from pathlib import Path
 
 from .names import (
@@ -386,12 +391,75 @@ def resolve_stored_path(folder: Path, stored: str) -> Path:
     return folder / path
 
 
+class OriginalState(Enum):
+    PRESENT = "present"
+    MISSING = "missing"
+    UNREADABLE = "unreadable"
+
+
+# UNC の stat が返らないとき、起動の view をここで打ち切る。
+_REMOTE_STAT_TIMEOUT = 3
+
+
+def _looks_remote(text: str) -> bool:
+    return text.replace("/", "\\").startswith("\\\\")
+
+
+def _is_not_found(exc: OSError) -> bool:
+    winerror = getattr(exc, "winerror", None)
+    if winerror in (2, 3):
+        return True
+    return exc.errno in (errno.ENOENT, errno.ENOTDIR)
+
+
+def _stat_original(path: Path) -> OriginalState:
+    try:
+        info = path.stat()
+    except OSError as exc:
+        if _is_not_found(exc):
+            return OriginalState.MISSING
+        return OriginalState.UNREADABLE
+    if not stat.S_ISREG(info.st_mode):
+        return OriginalState.MISSING
+    return OriginalState.PRESENT
+
+
+def _stat_original_timed(path: Path, timeout: float) -> OriginalState:
+    pool = ThreadPoolExecutor(max_workers=1)
+    future = pool.submit(_stat_original, path)
+    try:
+        return future.result(timeout=timeout)
+    except FuturesTimeoutError:
+        return OriginalState.UNREADABLE
+    except Exception:
+        return OriginalState.UNREADABLE
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
+def check_original(folder: Path, stored: str) -> OriginalState:
+    """原本の有無。無いファイルだけ MISSING。権限や切れた共有は UNREADABLE。PDF は開かない。"""
+    remote = _looks_remote(stored)
+    try:
+        path = Path(stored) if remote else resolve_stored_path(folder, stored)
+    except ValueError:
+        return OriginalState.UNREADABLE
+    if not remote and _looks_remote(str(path)):
+        remote = True
+    if remote:
+        return _stat_original_timed(path, _REMOTE_STAT_TIMEOUT)
+    return _stat_original(path)
+
+
 def original_is_present(folder: Path, stored: str) -> bool:
     """配置に書いた原本が、まだその場所にあるか。PDF は開かない。"""
-    try:
-        return resolve_stored_path(folder, stored).is_file()
-    except (OSError, ValueError):
-        return False
+    return check_original(folder, stored) is OriginalState.PRESENT
+
+
+def stored_file_name(stored: str) -> str:
+    """配置パスのファイル名。区切りは / でも \\ でも切る。"""
+    text = str(stored).replace("\\", "/").rstrip("/")
+    return text.rsplit("/", 1)[-1]
 
 
 def missing_original_message(names: tuple[str, ...]) -> str:
@@ -399,18 +467,23 @@ def missing_original_message(names: tuple[str, ...]) -> str:
     return "原本が見つかりません：" + "、".join(names)
 
 
+def unreadable_original_message(names: tuple[str, ...]) -> str:
+    """開けない原本の案内。フルパスではなくファイル名だけ。"""
+    return "原本を開けません。" + "、".join(names)
+
+
 def is_missing_original_message(message: str) -> bool:
     return message.startswith("原本が見つかりません：")
 
 
 def drop_missing_originals(folder: Path, card: Card) -> tuple[Card, tuple[str, ...]]:
-    """原本が無いファイルだけをカードから外す。号証番号と残った原本は動かさない。"""
+    """本当に無い原本だけをカードから外す。号証番号と残った原本は動かさない。"""
     missing: list[tuple[int, str]] = []
     flat = 0
     for slot in card.slots:
         for stored in slot.files:
-            if not original_is_present(folder, stored):
-                missing.append((flat, Path(stored).name))
+            if check_original(folder, stored) is OriginalState.MISSING:
+                missing.append((flat, stored_file_name(stored)))
             flat += 1
     if not missing:
         return card, ()

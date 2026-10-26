@@ -11,7 +11,6 @@ from .layout import (
     PageRow,
     Slot,
     check_original,
-    drop_missing_originals,
     missing_original_message,
     resolve_stored_path,
     stored_file_name,
@@ -173,29 +172,10 @@ def _jobs_for_card(
             series, card, merge_branches=merge_branches, shown=shown, book=book,
         ), []
     if missing_names:
-        # 原本が無い枝番だけ外す。残った枝番は今の番号のまま出す。除いたページは戻さない。
-        cleaned, _dropped = drop_missing_originals(folder, card)
-        skip = frozenset(
-            index
-            for index, (before, after) in enumerate(zip(card.slots, cleaned.slots))
-            if before.files and not after.files
-        )
-        errors = [_card_error(card, missing_original_message(missing_names))]
-        if not _flat_files(cleaned):
-            return [], errors, _preserve_names(
-                series, card, merge_branches=merge_branches, shown=shown, book=book,
-            ), []
-        jobs, more_errors, preserve, warnings = _jobs_for_present_card(
-            series,
-            cleaned,
-            folder,
-            merge_branches=merge_branches,
-            shown=shown,
-            book=book,
-            honor_exclusions=True,
-            skip=skip,
-        )
-        return jobs, [*errors, *more_errors], preserve, warnings
+        # 無い原本が一つでもある号証は出さない。前回の証拠 PDF は呼び出し側が残す。
+        return [], [_card_error(card, missing_original_message(missing_names))], _preserve_names(
+            series, card, merge_branches=merge_branches, shown=shown, book=book,
+        ), []
     return _jobs_for_present_card(
         series,
         card,

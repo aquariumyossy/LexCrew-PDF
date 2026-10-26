@@ -34,7 +34,6 @@ from .layout import (
     adopt_output_directory,
     check_original,
     default_layout,
-    drop_missing_originals,
     is_missing_original_message,
     layout_path,
     load_layout,
@@ -47,6 +46,7 @@ from .layout import (
     with_next_series,
     with_series,
 )
+from .originals import adopt_originals, copy_original, remember_case, release_copies
 from .pages import assignment_is_natural, shift_source_indexes
 
 
@@ -241,6 +241,7 @@ class Session:
             self.notice = f"保存先を {OUTPUT_DIR_NAME} に移せません。"
             return
         if not layout_path(folder).is_file():
+            remember_case(folder)
             return
         try:
             loaded = load_layout(folder)
@@ -250,8 +251,12 @@ class Session:
         if loaded is None:
             self.notice = "配置ファイルを読めません。"
             return
-        self.layout = loaded
+        adopted = adopt_originals(folder, loaded)
+        self.layout = adopted
         self.card_errors = {}
+        if adopted != loaded:
+            self._persist()
+        remember_case(folder)
 
     @_locked
     def add_card(self) -> dict:
@@ -268,13 +273,16 @@ class Session:
         card = self._card(number)
         if slot_index < 0 or slot_index >= len(card.slots):
             raise ValueError("証拠の番号が不正です。")
+        removed = tuple(item for slot in card.slots for item in slot.files) if len(card.slots) == 1 else card.slots[slot_index].files
         if len(card.slots) == 1:
             self._remove_evidence(number)
             editing = self.open_editor
             if editing is not None and editing.number > number:
                 self.open_editor = OpenEditor(editing.number - 1, editing.slot_index)
+            self._release(removed)
             return self.view()
         self._put(_without_slot(card, slot_index))
+        self._release(removed)
         return self.view()
 
     @_locked
@@ -389,10 +397,12 @@ class Session:
     @_locked
     def clear(self) -> dict:
         """作業中の配置を起動直後に戻す。生成済みPDFと出力フォルダは残す。"""
+        removed = self._all_files()
         self.open_editor = None
         self.card_errors = {}
         self.layout = default_layout()
         self._persist()
+        self._release(removed)
         return self.view()
 
     @_locked
@@ -476,11 +486,11 @@ class Session:
         self._guard(int(number))
         card = self._card(number)
         slot = card.slots[int(slot_index)]
-        # 無い原本だけで空に見える枝番へ足すときは、隠れたパスの後ろに足さず、その枝番を差し替える。
+        # 無い原本だけで空に見える枝番は、隠れたパスを差し替える。他の原本のページ指定は残す。
         if slot.files and all(
             self._original_state(stored) is OriginalState.MISSING for stored in slot.files
         ):
-            return self.replace_slot(number, slot_index, [file_path])
+            return self._replace_missing_slot(number, slot_index, file_path)
         stored = self._store(file_path)
         slots = list(card.slots)
         slot = slots[slot_index]
@@ -493,12 +503,32 @@ class Session:
         self._put(_replace(card, slots=tuple(slots), pages=pages, masks=masks, trims=trims, skews=skews))
         return self.view()
 
+    def _replace_missing_slot(self, number: int, slot_index: int, file_path: str) -> dict:
+        card = self._card(number)
+        slot = card.slots[int(slot_index)]
+        old = slot.files
+        stored = self._store(file_path)
+        slots = list(card.slots)
+        start = sum(len(item.files) for item in slots[:slot_index])
+        slots[slot_index] = replace(slot, files=(stored,))
+        self._put(_replace(
+            card,
+            slots=tuple(slots),
+            pages=_drop_pages(card.pages, start, len(old), 1),
+            masks=_drop_sources(card.masks, start, len(old), 1),
+            trims=_drop_sources(card.trims, start, len(old), 1),
+            skews=_drop_sources(card.skews, start, len(old), 1),
+        ))
+        self._release(old)
+        return self.view()
+
     @_locked
     def replace_file(self, number: int, slot_index: int, file_index: int, file_path: str) -> dict:
         self._guard(int(number))
         card = self._card(number)
         stored = self._store(file_path)
         slots = list(card.slots)
+        old = (slots[slot_index].files[file_index],)
         files = list(slots[slot_index].files)
         files[file_index] = stored
         flat = sum(len(item.files) for item in slots[:slot_index]) + file_index
@@ -507,6 +537,7 @@ class Session:
         trims = _drop_sources(card.trims, flat, 1, 1)
         skews = _drop_sources(card.skews, flat, 1, 1)
         self._put(_replace(card, slots=tuple(slots), pages=None, masks=masks, trims=trims, skews=skews))
+        self._release(old)
         return self.view()
 
     @_locked
@@ -515,15 +546,23 @@ class Session:
         if not paths:
             return self.view()
         card = self._card(number)
-        stored = tuple(self._store(path) for path in paths)
+        copied: list[str] = []
+        try:
+            for path in paths:
+                copied.append(self._store(path))
+        except Exception:
+            self._release(copied)
+            raise
         slots = list(card.slots)
+        old = slots[slot_index].files
         start = sum(len(item.files) for item in slots[:slot_index])
-        old_count = len(slots[slot_index].files)
-        slots[slot_index] = replace(slots[slot_index], files=stored)
-        masks = _drop_sources(card.masks, start, old_count, len(stored))
-        trims = _drop_sources(card.trims, start, old_count, len(stored))
-        skews = _drop_sources(card.skews, start, old_count, len(stored))
+        old_count = len(old)
+        slots[slot_index] = replace(slots[slot_index], files=tuple(copied))
+        masks = _drop_sources(card.masks, start, old_count, len(copied))
+        trims = _drop_sources(card.trims, start, old_count, len(copied))
+        skews = _drop_sources(card.skews, start, old_count, len(copied))
         self._put(_replace(card, slots=tuple(slots), pages=None, masks=masks, trims=trims, skews=skews))
+        self._release(old)
         return self.view()
 
     @_locked
@@ -843,27 +882,13 @@ class Session:
             skews = card.skews
             missing_names = []
             blocked_names = []
-            present = False
             for stored in (item for slot in card.slots for item in slot.files):
                 state = self._original_state(stored)
                 if state is OriginalState.MISSING:
                     missing_names.append(stored_file_name(stored))
                 elif state is OriginalState.UNREADABLE:
                     blocked_names.append(stored_file_name(stored))
-                else:
-                    present = True
-            if missing_names and present and not blocked_names and self.folder is not None:
-                # 無い原本の枝番だけ外して、残った枝番のサムネイルは数える。
-                card, _dropped = drop_missing_originals(self.folder, card)
-                paths = self._paths(card)
-                counts = [len(slot.files) for slot in card.slots]
-                rotations = [slot.rotation for slot in card.slots]
-                offsets = [(slot.stamp_dx, slot.stamp_dy) for slot in card.slots]
-                page_rows = _rows(card.pages)
-                masks = card.masks
-                trims = card.trims
-                skews = card.skews
-        if blocked_names or (missing_names and not present):
+        if missing_names or blocked_names:
             parts = []
             if missing_names:
                 parts.append(missing_original_message(tuple(missing_names)))
@@ -883,9 +908,7 @@ class Session:
         except OSError:
             names = tuple(stored_file_name(path) for path in paths)
             return {"ok": False, "message": unreadable_original_message(names), "slots": []}
-        buckets = resolve_buckets(
-            list(natural), page_rows, counts, honor_exclusions=bool(missing_names),
-        )
+        buckets = resolve_buckets(list(natural), page_rows, counts)
         page_counts = [len(list(buckets.get(index + 1) or [])) for index in range(len(counts))]
         slots = []
         cursor = 0
@@ -1303,12 +1326,19 @@ class Session:
         if self.folder is not None:
             save_layout(self.folder, self.layout)
 
+    def _all_files(self) -> tuple[str, ...]:
+        return tuple(item for card in self.layout.cards for slot in card.slots for item in slot.files)
+
+    def _release(self, stored_paths) -> None:
+        release_copies(stored_paths, live=self._all_files())
+
     def _store(self, file_path: str) -> str:
         path = Path(file_path)
         require_source_file(path)
+        copied = copy_original(path)
         if self.folder is None:
-            return str(path.resolve())
-        return store_path(self.folder, path)
+            return str(copied)
+        return store_path(self.folder, copied)
 
     def _paths(self, card: Card) -> tuple[str, ...]:
         folder = self.folder or Path(".")
@@ -1469,6 +1499,11 @@ def _sources_in_span(rows, start: int, count: int):
         for row in rows
         if start <= row.source < start + count
     )
+
+
+def _drop_pages(pages, start: int, old_count: int, new_count: int):
+    dropped = _drop_sources(pages, start, old_count, new_count)
+    return dropped or None
 
 
 def _drop_sources(rows, start: int, old_count: int, new_count: int):

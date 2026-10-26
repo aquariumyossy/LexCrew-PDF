@@ -55,21 +55,22 @@ def test_layout_round_trip(tmp_path):
 
 
 def test_missing_original_survives_close_and_returns_with_the_file(tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    from lexcrew_pdf.layout import Slot, save_layout
     from lexcrew_pdf.window import Api
 
     scans = tmp_path / "scans"
     scans.mkdir()
     missing = scans / "契約書.pdf"
     kept = tmp_path / "残す.pdf"
-    _pdf(missing)
     _pdf(kept)
-    session = Session(tmp_path)
-    session.add_file(3, 0, str(missing))
-    session.add_file(5, 0, str(kept))
-    stored = session.layout.cards[2].slots[0].files[0]
-    assert Path(stored).name == "契約書.pdf"
-    assert stored.replace("\\", "/") != "契約書.pdf"
-    missing.unlink()
+    layout = default_layout()
+    cards = list(layout.cards)
+    cards[2] = replace(cards[2], slots=(Slot(("scans/契約書.pdf",)),))
+    cards[4] = replace(cards[4], slots=(Slot((str(kept),)),))
+    save_layout(tmp_path, replace(layout, cards=tuple(cards)))
+    stored = "scans/契約書.pdf"
 
     restored = Session(tmp_path)
     view = restored.view()

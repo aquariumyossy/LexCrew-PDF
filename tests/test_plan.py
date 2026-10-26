@@ -12,6 +12,11 @@ from lexcrew_pdf.session import Session
 from lexcrew_pdf.stamp import yu_mincho_path
 
 
+def _stored(session, number, slot=0, index=0) -> Path:
+    card = next(item for item in session.layout.cards if item.number == number)
+    return Path(card.slots[slot].files[index])
+
+
 def _pdf(path, text="PAGE"):
     document = fitz.open()
     page = document.new_page(width=595, height=842)
@@ -496,10 +501,26 @@ def test_generation_reports_a_vanished_original_and_skips_the_partial_pdf(tmp_pa
     session.add_file(1, 0, str(missing))
     session.add_file(2, 0, str(also_missing))
     session.add_file(2, 0, str(kept))
-    missing.unlink()
-    also_missing.unlink()
     assert any(Path(stored).name == "消えた契約書.pdf" for stored in session.layout.cards[0].slots[0].files)
     assert [Path(stored).name for stored in session.layout.cards[1].slots[0].files] == ["無い付属.pdf", "残す.pdf"]
+    monkeypatch.setattr("lexcrew_pdf.write.require_stamp_font", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "lexcrew_pdf.write.stamp_sources_to_pdf",
+        lambda source_paths, *args, pages=None, parts=None, **kwargs: _marked_pdf(
+            _used_names(source_paths, pages, parts)
+        ),
+    )
+    first = session.generate()
+    assert first["ok"] is True
+    dest = tmp_path / "LexCrew-PDF-Downloads"
+    previous = {
+        path.name: path.read_bytes()
+        for path in dest.glob("*.pdf")
+    }
+    assert "甲001 消えた契約書.pdf" in previous
+    assert "甲002 無い付属.pdf" in previous
+    _stored(session, 1).unlink()
+    _stored(session, 2, 0, 0).unlink()
 
     opened = []
     import lexcrew_pdf.stamp as stamp
@@ -515,8 +536,7 @@ def test_generation_reports_a_vanished_original_and_skips_the_partial_pdf(tmp_pa
 
     monkeypatch.setattr(stamp, "open_source", spy)
     built = jobs_from_layout(session.layout, tmp_path)
-    assert [job.number for job in built.jobs] == [2]
-    assert [Path(source).name for source in built.jobs[0].sources] == ["残す.pdf"]
+    assert built.jobs == ()
     assert [row["number"] for row in built.errors] == [1, 2]
     assert built.errors[0]["message"] == "原本が見つかりません：消えた契約書.pdf"
     assert built.errors[1]["message"] == "原本が見つかりません：無い付属.pdf"
@@ -524,30 +544,28 @@ def test_generation_reports_a_vanished_original_and_skips_the_partial_pdf(tmp_pa
     assert "無い付属.pdf" not in opened
     assert str(tmp_path) not in built.errors[0]["message"]
 
-    def fake_pdf(source_paths, *args, pages=None, parts=None, **kwargs):
-        return _marked_pdf(_used_names(source_paths, pages, parts))
-
-    monkeypatch.setattr("lexcrew_pdf.write.require_stamp_font", lambda *args, **kwargs: None)
-    monkeypatch.setattr("lexcrew_pdf.write.stamp_sources_to_pdf", fake_pdf)
     opened.clear()
     result = session.generate()
     assert "消えた契約書.pdf" not in opened
     assert "無い付属.pdf" not in opened
     assert result["ok"] is False
-    assert [row["filename"] for row in result["written"]] == ["甲002 残す.pdf"]
-    written = (tmp_path / "LexCrew-PDF-Downloads" / "甲002 残す.pdf").read_bytes()
-    assert "残す.pdf".encode() in written
-    assert "無い付属.pdf".encode() not in written
-    assert "消えた契約書.pdf".encode() not in written
+    assert result["written"] == []
+    assert {path.name: path.read_bytes() for path in dest.glob("*.pdf")} == previous
+    assert "残す.pdf".encode() in previous["甲002 無い付属.pdf"]
     assert "Errno 2" not in result["message"]
     assert str(missing) not in result["message"]
     assert str(also_missing) not in result["message"]
+    assert "削除したファイル" not in result["message"]
     first = result["cards"][0]
     second = result["cards"][1]
     assert first["hasFile"] is False
     assert first["slots"][0]["files"] == []
     assert first["message"] == "原本が見つかりません：消えた契約書.pdf"
     assert [item["name"] for item in second["slots"][0]["files"]] == ["残す.pdf"]
+    mixed = Api(session).media(2)
+    assert mixed["ok"] is False
+    assert mixed["message"] == "原本が見つかりません：無い付属.pdf"
+    assert "残す.pdf" not in mixed["message"]
     assert second["message"] == "原本が見つかりません：無い付属.pdf"
     assert "残す.pdf" not in second["message"]
     media = Api(session).media(1)
@@ -730,7 +748,7 @@ def test_missing_primary_does_not_bring_excluded_pages_back(tmp_path, monkeypatc
             PageRow(source=1, page=0, part=0, group=0, position=1),
         ),
     ))
-    body.unlink()
+    _stored(session, 1, 0, 0).unlink()
     assert [Path(item).name for item in session.layout.cards[0].slots[0].files] == ["本文.pdf", "送付状.pdf"]
     cleaned, names = drop_missing_originals(tmp_path, session.layout.cards[0])
     assert names == ("本文.pdf",)
@@ -781,8 +799,8 @@ def test_failed_regeneration_keeps_the_previous_evidence_pdf(tmp_path, monkeypat
     output = tmp_path / "LexCrew-PDF-Downloads" / "甲001 契約書.pdf"
     assert output.is_file()
     previous = output.read_bytes()
-    contract.unlink()
-    extra.write_bytes(b"not a pdf")
+    _stored(session, 1, 0, 0).unlink()
+    _stored(session, 1, 0, 1).write_bytes(b"not a pdf")
     second = session.generate()
     assert second["ok"] is False
     assert output.is_file()
@@ -804,7 +822,7 @@ def test_emptied_first_branch_title_is_not_the_merged_filename(tmp_path, monkeyp
     session.add_branch(1)
     session.add_file(1, 2, str(delivery))
     session.set_title(1, "売買契約書", 0)
-    sale.unlink()
+    _stored(session, 1, 0, 0).unlink()
     view = session.view()["cards"][0]
     assert view["slots"][0]["files"] == []
     assert view["slots"][0]["filename"] == "甲001-2~3 領収.pdf"
@@ -812,22 +830,12 @@ def test_emptied_first_branch_title_is_not_the_merged_filename(tmp_path, monkeyp
     assert "売買契約書" not in view["mergedFilename"]
     assert all("売買契約書" not in slot["filename"] for slot in view["slots"])
     built = jobs_from_layout(session.layout, tmp_path)
-    assert [job.filename for job in built.jobs] == ["甲001-2~3 領収.pdf"]
+    assert built.jobs == ()
     monkeypatch.setattr("lexcrew_pdf.write.require_stamp_font", lambda *args, **kwargs: None)
-    monkeypatch.setattr(
-        "lexcrew_pdf.write.stamp_sources_to_pdf",
-        lambda source_paths, *args, pages=None, parts=None, **kwargs: _marked_pdf(
-            _used_names(source_paths, pages, parts)
-        ),
-    )
+    monkeypatch.setattr("lexcrew_pdf.write.stamp_sources_to_pdf", lambda *args, **kwargs: b"%PDF-1.4\npartial\n")
     result = session.generate()
-    output = tmp_path / "LexCrew-PDF-Downloads" / "甲001-2~3 領収.pdf"
-    assert output.is_file()
-    body = output.read_bytes()
-    assert "領収.pdf".encode() in body
-    assert "納品.pdf".encode() in body
-    assert "売買.pdf".encode() not in body
-    assert "売買契約書" not in output.name
+    assert result["ok"] is False
+    assert list((tmp_path / "LexCrew-PDF-Downloads").glob("*.pdf")) == []
     assert "原本が見つかりません：売買.pdf" in result["cards"][0]["message"]
     assert result["cards"][0]["slots"][1]["label"] == "甲第１号証の２"
 
@@ -845,7 +853,7 @@ def test_missing_notice_follows_the_slot_and_stays_with_other_warnings(tmp_path,
     session.add_file(1, 1, str(missing))
     session.add_branch(1)
     session.add_file(1, 2, str(tail))
-    missing.unlink()
+    _stored(session, 1, 1, 0).unlink()
     session.card_errors[1] = "甲第１号証の２に出すページが無いため、まとめて出力しません。"
     view = session.view()["cards"][0]
     assert "原本が見つかりません：無い付属.pdf" in view["message"]
@@ -884,7 +892,7 @@ def test_failed_generation_keeps_the_previous_pdf_when_the_name_changes(tmp_path
     output = dest / "甲001 契約書.pdf"
     assert output.is_file()
     previous = output.read_bytes()
-    contract.unlink()
+    _stored(session, 1).unlink()
     session.add_branch(1)
     preview = session.preview_generate()
     assert preview["delete"] == []
@@ -908,7 +916,7 @@ def test_failed_generation_keeps_the_previous_pdf_after_title_series_and_start_n
     session.generate()
     output = tmp_path / "LexCrew-PDF-Downloads" / "甲001 契約書.pdf"
     previous = output.read_bytes()
-    contract.write_bytes(b"not a pdf")
+    _stored(session, 1).write_bytes(b"not a pdf")
     session.set_title(1, "領収書", 0)
     assert "甲001 契約書.pdf" not in session.preview_generate()["delete"]
     renamed = session.generate()
@@ -965,7 +973,7 @@ def test_add_file_on_an_empty_missing_card_replaces_the_hidden_path(tmp_path, mo
     session.add_file(1, 0, str(missing))
     session.add_branch(1)
     session.add_file(1, 1, str(other))
-    missing.unlink()
+    _stored(session, 1, 0, 0).unlink()
     view = session.view()["cards"][0]
     assert view["slots"][0]["files"] == []
     assert "原本が見つかりません：消えた.pdf" in view["message"]
@@ -1020,7 +1028,6 @@ def test_remaining_branch_is_written_and_excluded_pages_stay_out(tmp_path, monke
             PageRow(source=2, page=0, part=0, group=2, position=2),
         ),
     ))
-    body.unlink()
     monkeypatch.setattr("lexcrew_pdf.write.require_stamp_font", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         "lexcrew_pdf.write.stamp_sources_to_pdf",
@@ -1028,34 +1035,24 @@ def test_remaining_branch_is_written_and_excluded_pages_stay_out(tmp_path, monke
             _used_names(source_paths, pages, parts)
         ),
     )
-    stamped = []
-
-    def fake_stamped(paths, stamp, page_index, **kwargs):
-        pages = kwargs.get("pages") or ()
-        stamped.append((stamp, [Path(paths[ref[0]]).name for ref in pages]))
-        return b"jpeg"
-
-    monkeypatch.setattr("lexcrew_pdf.stamp.render_stamped_page_jpeg", fake_stamped)
-    monkeypatch.setattr("lexcrew_pdf.stamp.render_piece_jpeg", lambda *args, **kwargs: b"jpeg")
-    media = session.media(1)
-    assert media.get("ok") is not False
-    assert [slot["pageCount"] for slot in media["slots"]] == [0, 1]
-    assert stamped
-    assert all("残す.pdf" in names and "送付状.pdf" not in names and "本文.pdf" not in names for _stamp, names in stamped)
-    result = session.generate()
+    session.generate()
     dest = tmp_path / "LexCrew-PDF-Downloads"
-    written = sorted(path.name for path in dest.glob("*.pdf"))
-    assert written == ["甲001-2 残す.pdf"]
-    payload = (dest / "甲001-2 残す.pdf").read_bytes()
-    assert "残す.pdf".encode() in payload
-    assert "送付状.pdf".encode() not in payload
-    assert "本文.pdf".encode() not in payload
+    previous = {path.name: path.read_bytes() for path in dest.glob("*.pdf")}
+    assert previous
+    _stored(session, 1, 0, 0).unlink()
+    media = session.media(1)
+    assert media["ok"] is False
+    assert media["message"] == "原本が見つかりません：本文.pdf"
+    assert media["slots"] == []
+    result = session.generate()
+    assert {path.name: path.read_bytes() for path in dest.glob("*.pdf")} == previous
     card = result["cards"][0]
     assert card["slots"][0]["label"] == "甲第１号証の１"
     assert card["slots"][1]["label"] == "甲第１号証の２"
     assert "原本が見つかりません：本文.pdf" in card["message"]
     assert [item["name"] for item in card["slots"][1]["files"]] == ["残す.pdf"]
     assert result["ok"] is False
+    assert "削除したファイル" not in result["message"]
 
 
 def test_old_layout_without_stamp_enabled_keeps_the_stamp_on():

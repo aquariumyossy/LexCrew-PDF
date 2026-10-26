@@ -811,13 +811,13 @@ def test_move_branch_carries_pages_and_split_without_opening_pdfs(tmp_path, monk
     monkeypatch.setattr(fitz, "open", refuse_open)
     session.move_slot(1, 0, 2)
     assert session.layout.cards[0].split_a4 is True
-    assert [slot.files[0] for slot in session.layout.cards[0].slots] == ["b.pdf", "c.pdf"]
+    assert [Path(slot.files[0]).name for slot in session.layout.cards[0].slots] == ["b.pdf", "c.pdf"]
     assert session.layout.cards[0].pages == (
         PageRow(source=0, page=0, part=0, group=1, position=0),
         PageRow(source=1, page=0, part=0, group=2, position=1),
     )
     assert session.layout.cards[1].split_a4 is True
-    assert session.layout.cards[1].slots[0].files == ("a.pdf",)
+    assert [Path(item).name for item in session.layout.cards[1].slots[0].files] == ["a.pdf"]
     assert session.layout.cards[1].pages == (
         PageRow(source=0, page=0, part=0, group=0, position=0),
         PageRow(source=0, page=0, part=1, group=1, position=1),

@@ -353,7 +353,12 @@ def source_is_unusable(path: str, *, fresh: bool = False) -> bool:
     file_path = Path(path)
     try:
         info = file_path.stat()
-        key = (str(file_path.resolve()), info.st_size, getattr(info, "st_mtime_ns", info.st_mtime))
+        key = (
+            str(file_path.resolve()),
+            info.st_size,
+            getattr(info, "st_mtime_ns", info.st_mtime),
+            info.st_mode,
+        )
     except OSError:
         return True
     if not fresh and key in _probe_cache:

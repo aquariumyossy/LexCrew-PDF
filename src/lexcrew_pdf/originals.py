@@ -110,11 +110,11 @@ def release_copies(stored_paths, *, live: tuple[str, ...] | list[str] = ()) -> t
 
     消せなかったファイル名を返す。例外は上げない。パスは返さない。
     """
-    failed: list[str] = []
     saved = _saved_references()
     if saved is None:
         return ()
     live_keys = _keys(live)
+    pending: list[Path] = []
     for stored in stored_paths:
         path = _resolved_stored(None, stored)
         if path is None or not _is_app_copy(path):
@@ -125,21 +125,59 @@ def release_copies(stored_paths, *, live: tuple[str, ...] | list[str] = ()) -> t
         try:
             exists = path.is_file()
         except OSError:
-            failed.append(path.name)
-            continue
+            return (path.name,)
         if exists:
+            pending.append(path)
+    held: list[tuple[Path, Path]] = []
+    try:
+        for path in pending:
+            holding = _holding_path(path)
+            os.replace(path, holding)
+            held.append((path, holding))
+    except OSError:
+        for original, holding in reversed(held):
             try:
-                path.unlink()
+                if holding.is_file():
+                    os.replace(holding, original)
             except OSError:
-                failed.append(path.name)
-                continue
-        parent = path.parent
+                pass
+        failed_at = pending[len(held)].name if len(held) < len(pending) else ""
+        return (failed_at,) if failed_at else ()
+    failed: list[str] = []
+    for original, holding in held:
+        try:
+            holding.unlink()
+        except OSError:
+            try:
+                if holding.is_file():
+                    os.replace(holding, original)
+            except OSError:
+                pass
+            failed.append(original.name)
+            for later_original, later_holding in held:
+                if later_holding == holding or not later_holding.is_file():
+                    continue
+                try:
+                    os.replace(later_holding, later_original)
+                except OSError:
+                    pass
+            return tuple(failed)
+        parent = original.parent
         try:
             if parent != originals_dir().resolve() and parent.is_dir() and not any(parent.iterdir()):
                 parent.rmdir()
         except OSError:
             pass
     return tuple(failed)
+
+
+def _holding_path(path: Path) -> Path:
+    candidate = path.with_name(path.name + ".releasing")
+    index = 2
+    while candidate.exists():
+        candidate = path.with_name(f"{path.name}.releasing{index}")
+        index += 1
+    return candidate
 
 
 def _reusable_copy(source: Path) -> Path | None:

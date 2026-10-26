@@ -185,7 +185,7 @@ function slotCard(card, slot, isLast) {
       source.className = file.missing ? "evidence-source is-missing" : "evidence-source";
       source.textContent = `原本: ${file.name}`;
       if (!locked) rememberDrop(source, card.number, slot.index, file.index);
-      if (file.missing && !locked) {
+      if ((file.missing || file.unusable) && !locked) {
         source.appendChild(miniButton("外す", () => api.remove_file(card.number, slot.index, file.index).then(applyView)));
       }
       meta.appendChild(source);

@@ -103,25 +103,24 @@ def write_jobs(
             "replaced": (),
             "deleted": (),
         }
-    staged: list[tuple[OutputJob, Path, Path, bool]] = []
-    try:
-        dest.mkdir(parents=True, exist_ok=True)
-        for job, data in rendered:
-            target = _checked_output_path(dest, job.filename)
-            tmp = dest / f"{job.filename}.writing"
-            tmp.write_bytes(data)
-            staged.append((job, target, tmp, target.is_file()))
-        for job, target, tmp, replacing in staged:
-            os.replace(tmp, target)
-            if replacing:
-                replaced.append(job.filename)
-            written.append({
-                "filename": job.filename,
-                "stampLabel": job.stamp,
-            })
-    finally:
-        for _job, _target, tmp, _replacing in staged:
-            tmp.unlink(missing_ok=True)
+    if not rendered:
+        written, replaced = [], []
+    else:
+        try:
+            written, replaced = _publish_rendered(dest, rendered)
+        except _PublishFailed as failed:
+            # 途中まで置いたファイルは戻してある。前回分の記録はそのまま。
+            return {
+                "written": [],
+                "errors": [{
+                    "filename": failed.job.filename if failed.job is not None else "",
+                    "stampLabel": failed.job.stamp if failed.job is not None else "",
+                    "message": _short_error(failed.cause),
+                }],
+                "keep": tuple(last_written),
+                "replaced": (),
+                "deleted": (),
+            }
     keep = {row["filename"] for row in written} | set(preserve)
     deleted = _delete_stale(dest, last_written, keep)
     return {
@@ -131,6 +130,77 @@ def write_jobs(
         "replaced": tuple(replaced),
         "deleted": tuple(deleted),
     }
+
+
+class _PublishFailed(Exception):
+    def __init__(self, cause: OSError, job: OutputJob | None) -> None:
+        self.cause = cause
+        self.job = job
+
+
+def _publish_rendered(dest: Path, rendered: list[tuple[OutputJob, bytes]]) -> tuple[list[dict], list[str]]:
+    """全部の PDF を置いてから戻る。一つでも失敗したら、置いた分を戻して上げる。"""
+    staged: list[tuple[OutputJob, Path, Path]] = []
+    published: list[tuple[OutputJob, Path, Path | None]] = []
+    current: OutputJob | None = None
+    try:
+        dest.mkdir(parents=True, exist_ok=True)
+        for job, data in rendered:
+            current = job
+            target = _checked_output_path(dest, job.filename)
+            tmp = dest / f"{job.filename}.writing"
+            tmp.write_bytes(data)
+            staged.append((job, target, tmp))
+        for job, target, tmp in staged:
+            current = job
+            backup: Path | None = None
+            if target.is_file():
+                backup = _rollback_path(dest, job.filename)
+                os.replace(target, backup)
+            try:
+                os.replace(tmp, target)
+            except OSError:
+                if backup is not None and backup.is_file():
+                    os.replace(backup, target)
+                raise
+            published.append((job, target, backup))
+    except OSError as exc:
+        _restore_published(published)
+        raise _PublishFailed(exc, current) from exc
+    finally:
+        for _job, _target, tmp in staged:
+            tmp.unlink(missing_ok=True)
+    written: list[dict] = []
+    replaced: list[str] = []
+    for job, _target, backup in published:
+        if backup is not None:
+            try:
+                backup.unlink()
+            except OSError:
+                pass
+            replaced.append(job.filename)
+        written.append({"filename": job.filename, "stampLabel": job.stamp})
+    return written, replaced
+
+
+def _restore_published(published: list[tuple[OutputJob, Path, Path | None]]) -> None:
+    for _job, target, backup in reversed(published):
+        try:
+            if backup is None:
+                target.unlink(missing_ok=True)
+            elif backup.is_file():
+                os.replace(backup, target)
+        except OSError:
+            continue
+
+
+def _rollback_path(dest: Path, filename: str) -> Path:
+    candidate = dest / f".{filename}.rollback"
+    index = 2
+    while candidate.exists():
+        candidate = dest / f".{filename}.rollback{index}"
+        index += 1
+    return candidate
 
 
 def foreign_output_names(folder: Path, last_written: tuple[str, ...] | list[str]) -> set[str]:

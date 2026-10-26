@@ -872,6 +872,27 @@ def test_boot_uses_the_download_folder(monkeypatch, tmp_path):
     assert [card["number"] for card in session.view()["cards"]] == [1, 2, 3, 4, 5, 6]
 
 
+def test_boot_starts_when_the_output_folder_cannot_be_read(monkeypatch, tmp_path):
+    case = tmp_path / "case"
+    output = case / "LexCrew-PDF-Downloads"
+    output.mkdir(parents=True)
+    (output / "layout.json").write_text("{}", encoding="utf-8")
+    output.chmod(0)
+    monkeypatch.setenv("LEXCREW_FOLDER", str(case))
+    try:
+        try:
+            session = app_window.boot()
+        except Exception:
+            pytest.fail("起動できません。")
+        assert session.folder == case
+        assert session.notice == "配置ファイルを読めません。"
+        view = session.view()
+        assert view["message"] == "配置ファイルを読めません。"
+        assert [card["number"] for card in view["cards"]] == [1, 2, 3, 4, 5, 6]
+    finally:
+        output.chmod(0o755)
+
+
 def test_boot_uses_lexcrew_folder_when_set(monkeypatch, tmp_path):
     chosen = tmp_path / "chosen"
     chosen.mkdir()

@@ -47,7 +47,7 @@ from .layout import (
     with_series,
 )
 from .originals import adopt_originals, copy_original, remember_case, release_copies
-from .pages import assignment_is_natural, shift_source_indexes
+from .pages import GROUP_EXCLUDED, assignment_is_natural, shift_source_indexes
 
 
 class _GUID(ctypes.Structure):
@@ -553,19 +553,20 @@ class Session:
         files[file_index] = stored
         flat = sum(len(item.files) for item in slots[:slot_index]) + file_index
         owned = [row for row in (card.pages or ()) if row.source == flat]
-        anchor = min(owned, key=lambda row: row.position) if owned else None
+        anchor = _replacement_place(owned, slot_index)
         slots[slot_index] = replace(slots[slot_index], files=tuple(files))
         masks = _drop_sources(card.masks, flat, 1, 1)
         trims = _drop_sources(card.trims, flat, 1, 1)
         skews = _drop_sources(card.skews, flat, 1, 1)
         pages = _drop_pages(card.pages, flat, 1, 1)
         if anchor is not None and pages is not None:
+            position, group = anchor
             pages = _pages_at_replaced_position(
                 pages,
                 flat,
                 _natural_parts(self.folder, stored, card.split_a4, slots[slot_index].rotation),
-                anchor.position,
-                anchor.group,
+                position,
+                group,
             )
         self._put(_replace(
             card,
@@ -576,6 +577,7 @@ class Session:
             skews=skews,
         ))
         self._release(old)
+        self._current_card_error(self._card(number))
         return self.view()
 
     @_locked
@@ -588,7 +590,7 @@ class Session:
         file_index = int(file_index)
         if file_index < 0 or file_index >= len(slot.files):
             raise ValueError("原本の番号が不正です。")
-        if self._original_state(slot.files[file_index]) is not OriginalState.MISSING:
+        if not self._can_remove_original(slot.files[file_index]):
             raise ValueError("この原本は外せません。")
         old = (slot.files[file_index],)
         failed = release_copies(old, live=_live_without(self._all_files(), old))
@@ -607,6 +609,7 @@ class Session:
             trims=_drop_sources(card.trims, flat, 1, 0),
             skews=_drop_sources(card.skews, flat, 1, 0),
         ))
+        self._current_card_error(self._card(number))
         return self.view()
 
     @_locked
@@ -1165,7 +1168,9 @@ class Session:
         if built.errors:
             return {"replace": [], "delete": [], "keep": []}
         names = [job.filename for job in built.jobs]
-        return pending_writes(self.folder, names, self.layout.last_written, built.kept)
+        pending = pending_writes(self.folder, names, self.layout.last_written, built.kept)
+        pending["writing"] = names
+        return pending
 
     def generate(self) -> dict:
         from .plan import generation_blockers, jobs_from_layout
@@ -1317,9 +1322,8 @@ class Session:
             for slot_states in states
             for state in slot_states
         )
-        unusable = stat_blocked or bool(
-            _unusable_stored(self.folder, _flat_card_files(card)) if self.folder is not None else ()
-        )
+        bad_stored = _unusable_stored(self.folder, _flat_card_files(card)) if self.folder is not None else ()
+        unusable = stat_blocked or bool(bad_stored)
         if unusable:
             choice = MergeChoice()
         else:
@@ -1347,6 +1351,8 @@ class Session:
                 }
                 if state is OriginalState.MISSING:
                     row["missing"] = True
+                elif stored in bad_stored:
+                    row["unusable"] = True
                 visible.append(row)
             slots.append({
                 "index": index,
@@ -1385,7 +1391,11 @@ class Session:
 
         blocked = set()
         if self.folder is not None:
-            blocked = foreign_output_names(self.folder, self.layout.last_written)
+            try:
+                blocked = foreign_output_names(self.folder, self.layout.last_written)
+            except OSError:
+                if not self.notice:
+                    self.notice = "配置ファイルを読めません。"
         return FilenameBook(self.layout.label_template, self.layout.stamp_enabled, blocked=blocked)
 
     def _title_from_field(self, card: Card, slot_index: int, text: str) -> str:
@@ -1424,6 +1434,8 @@ class Session:
         raise ValueError("証拠の番号が不正です。")
 
     def _remove_evidence(self, number: int) -> None:
+        previous_layout = self.layout
+        previous_errors = self.card_errors
         kept = [card for card in self.layout.cards if card.number != number]
         renumbered = tuple(_replace(card, number=index) for index, card in enumerate(kept, start=1))
         shifted: dict[int, str] = {}
@@ -1433,7 +1445,12 @@ class Session:
                 shifted[new_number] = message
         self.card_errors = shifted
         self.layout = self._with_cards(renumbered)
-        self._persist()
+        try:
+            self._persist()
+        except OSError:
+            self.layout = previous_layout
+            self.card_errors = previous_errors
+            raise
 
     def _put(self, card: Card) -> None:
         cards = tuple(card if item.number == card.number else item for item in self.layout.cards)
@@ -1442,6 +1459,59 @@ class Session:
 
     def _with_cards(self, cards: tuple[Card, ...]) -> Layout:
         return replace(self.layout, cards=cards)
+
+    def _can_remove_original(self, stored: str) -> bool:
+        """無い原本と、開いてもページを読めない原本だけ外せる。"""
+        state = self._original_state(stored)
+        if state is not OriginalState.PRESENT:
+            return True
+        if self.folder is None:
+            return False
+        from .layout import resolve_stored_path
+        from .stamp import source_is_unusable
+
+        try:
+            path = resolve_stored_path(self.folder, stored)
+        except ValueError:
+            return True
+        return source_is_unusable(str(path), fresh=True)
+
+    def _current_card_error(self, card: Card) -> str:
+        """直した原本の『原本が見つかりません』は、もう出さない。"""
+        message = self.card_errors.get(card.number, "")
+        if not message or not is_missing_original_message(message):
+            return message
+        prefix = "原本が見つかりません："
+        bad = self._bad_original_names(card)
+        names = [name for name in message[len(prefix):].split("、") if name and name in bad]
+        if names:
+            updated = missing_original_message(tuple(names))
+            self.card_errors[card.number] = updated
+            return updated
+        self.card_errors.pop(card.number, None)
+        return ""
+
+    def _bad_original_names(self, card: Card) -> set[str]:
+        if self.folder is None:
+            return set()
+        from .layout import resolve_stored_path
+        from .stamp import source_is_unusable
+
+        names: set[str] = set()
+        for stored in _flat_card_files(card):
+            name = stored_file_name(stored)
+            state = check_original(self.folder, stored)
+            if state is not OriginalState.PRESENT:
+                names.add(name)
+                continue
+            try:
+                path = resolve_stored_path(self.folder, stored)
+            except ValueError:
+                names.add(name)
+                continue
+            if source_is_unusable(str(path)):
+                names.add(name)
+        return names
 
     def _original_state(self, stored: str) -> OriginalState:
         if self.folder is None:
@@ -1547,6 +1617,19 @@ def _natural_parts(folder: Path | None, stored: str, split: bool, tilt: int) -> 
     except Exception:
         return ()
     return tuple(natural)
+
+
+def _replacement_place(owned, slot_index: int) -> tuple[int, int] | None:
+    """差替えた原本を出す位置。除いたページのグループは引き継がない。"""
+    if not owned:
+        return None
+    position = min(row.position for row in owned)
+    included = [row for row in owned if row.group != GROUP_EXCLUDED]
+    if included:
+        group = min(included, key=lambda row: row.position).group
+    else:
+        group = slot_index + 1
+    return position, group
 
 
 def _pages_at_replaced_position(pages, source: int, natural, anchor: int, group: int):

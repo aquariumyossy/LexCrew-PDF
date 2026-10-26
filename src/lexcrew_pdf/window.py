@@ -37,7 +37,12 @@ def output_root() -> Path:
 
 def boot() -> Session:
     session = Session(output_root())
-    session.view()
+    try:
+        session.view()
+    except OSError:
+        # 出力先が読めなくても窓は開く。案内は Session が既に持っている文を使う。
+        if not session.notice:
+            session.notice = "配置ファイルを読めません。"
     print("cards-ready", flush=True)
     return session
 
@@ -645,10 +650,12 @@ def _preview_token(preview) -> str:
     for row in preview.get("keep") or []:
         if isinstance(row, dict):
             keep.append((row.get("existing"), row.get("writing")))
+    writing = [str(name) for name in (preview.get("writing") or [])]
     return "\n".join([
         "replace:" + "\n".join(preview.get("replace") or []),
         "delete:" + "\n".join(preview.get("delete") or []),
         "keep:" + "\n".join(f"{existing}=>{writing}" for existing, writing in keep),
+        "writing:" + "\n".join(writing),
     ])
 
 

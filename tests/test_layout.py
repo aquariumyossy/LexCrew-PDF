@@ -8,7 +8,12 @@ import fitz
 import pytest
 
 from lexcrew_pdf.layout import (
+    Card,
+    Mask,
+    PageRow,
+    Slot,
     default_layout,
+    drop_missing_originals,
     layout_to_json,
     load_layout,
     parse_layout,
@@ -47,6 +52,81 @@ def test_layout_round_trip(tmp_path):
     raw = json.loads((tmp_path / "LexCrew-PDF-Downloads" / "layout.json").read_text(encoding="utf-8"))
     assert "title" not in raw["cards"][1]
     assert raw["cards"][1]["slots"][0]["title"] == "契約書"
+
+
+def test_restore_drops_a_missing_original_and_keeps_the_exhibit_number(tmp_path, monkeypatch):
+    scans = tmp_path / "scans"
+    scans.mkdir()
+    missing = scans / "契約書.pdf"
+    kept = tmp_path / "残す.pdf"
+    _pdf(missing)
+    _pdf(kept)
+    session = Session(tmp_path)
+    session.add_file(3, 0, str(missing))
+    session.add_file(5, 0, str(kept))
+    stored = session.layout.cards[2].slots[0].files[0]
+    assert Path(stored).name == "契約書.pdf"
+    assert stored.replace("\\", "/") != "契約書.pdf"
+    missing.unlink()
+
+    restored = Session(tmp_path)
+    view = restored.view()
+    assert view["message"] == ""
+    assert [card["number"] for card in view["cards"]] == [1, 2, 3, 4, 5, 6]
+    card = view["cards"][2]
+    assert card["number"] == 3
+    assert card["label"] == "甲第３号証"
+    assert card["hasFile"] is False
+    assert card["slots"][0]["files"] == []
+    assert card["message"] == "原本が見つかりません：契約書.pdf"
+    assert restored.layout.cards[2].number == 3
+    assert restored.layout.cards[2].slots[0].files == ()
+    kept_card = view["cards"][4]
+    assert kept_card["number"] == 5
+    assert kept_card["label"] == "甲第５号証"
+    assert kept_card["hasFile"] is True
+    assert kept_card["message"] == ""
+    assert kept_card["slots"][0]["files"][0]["name"] == "残す.pdf"
+    built = jobs_from_layout(restored.layout, tmp_path)
+    assert all(Path(source).name != "契約書.pdf" for job in built.jobs for source in job.sources)
+    assert [job.number for job in built.jobs] == [5]
+    monkeypatch.setattr("lexcrew_pdf.write.require_stamp_font", lambda *args, **kwargs: None)
+    monkeypatch.setattr("lexcrew_pdf.write.stamp_sources_to_pdf", lambda *args, **kwargs: b"%PDF-1.4\n")
+    generated = restored.generate()
+    assert generated["ok"] is True
+    assert [row["filename"] for row in generated["written"]] == ["甲005 残す.pdf"]
+    assert "Errno 2" not in generated["message"]
+    assert "原本を開けません" not in generated["message"]
+    again = next(item for item in generated["cards"] if item["number"] == 3)
+    assert again["hasFile"] is False
+    assert again["slots"][0]["files"] == []
+    assert again["label"] == "甲第３号証"
+    assert again["message"] == "原本が見つかりません：契約書.pdf"
+
+
+def test_drop_missing_original_keeps_the_later_file_and_its_pages(tmp_path):
+    first = tmp_path / "先.pdf"
+    second = tmp_path / "後.pdf"
+    _pdf(first)
+    _pdf(second)
+    card = Card(
+        number=4,
+        split_a4=False,
+        slots=(Slot((store_path(tmp_path, first), store_path(tmp_path, second)), "書名"),),
+        pages=(
+            PageRow(0, 0, 0, 0, 0),
+            PageRow(1, 0, 0, 1, 1),
+        ),
+        masks=(Mask(1, 0, 1, 2, 3, 4),),
+    )
+    first.unlink()
+    cleaned, names = drop_missing_originals(tmp_path, card)
+    assert names == ("先.pdf",)
+    assert cleaned.number == 4
+    assert cleaned.slots[0].title == "書名"
+    assert [Path(item).name for item in cleaned.slots[0].files] == ["後.pdf"]
+    assert cleaned.pages == (PageRow(0, 0, 0, 1, 0),)
+    assert cleaned.masks == (Mask(0, 0, 1, 2, 3, 4),)
 
 
 def test_inside_path_is_relative_and_outside_path_is_absolute(tmp_path):

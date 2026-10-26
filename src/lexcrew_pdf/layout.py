@@ -386,6 +386,91 @@ def resolve_stored_path(folder: Path, stored: str) -> Path:
     return folder / path
 
 
+def original_is_present(folder: Path, stored: str) -> bool:
+    """配置に書いた原本が、まだその場所にあるか。PDF は開かない。"""
+    try:
+        return resolve_stored_path(folder, stored).is_file()
+    except (OSError, ValueError):
+        return False
+
+
+def missing_original_message(names: tuple[str, ...]) -> str:
+    """カードに出す案内。フルパスではなくファイル名だけ。"""
+    return "原本が見つかりません：" + "、".join(names)
+
+
+def is_missing_original_message(message: str) -> bool:
+    return message.startswith("原本が見つかりません：")
+
+
+def drop_missing_originals(folder: Path, card: Card) -> tuple[Card, tuple[str, ...]]:
+    """原本が無いファイルだけをカードから外す。号証番号と残った原本は動かさない。"""
+    missing: list[tuple[int, str]] = []
+    flat = 0
+    for slot in card.slots:
+        for stored in slot.files:
+            if not original_is_present(folder, stored):
+                missing.append((flat, Path(stored).name))
+            flat += 1
+    if not missing:
+        return card, ()
+    updated = card
+    for index, _name in reversed(missing):
+        updated = _without_stored_file(updated, index)
+    return updated, tuple(name for _index, name in missing)
+
+
+def _without_stored_file(card: Card, index: int) -> Card:
+    slots = []
+    cursor = 0
+    found = False
+    for slot in card.slots:
+        count = len(slot.files)
+        if not found and cursor <= index < cursor + count:
+            local = index - cursor
+            files = slot.files[:local] + slot.files[local + 1 :]
+            slots.append(replace(slot, files=files))
+            found = True
+        else:
+            slots.append(slot)
+        cursor += count
+    if not found:
+        return card
+    return replace(
+        card,
+        slots=tuple(slots),
+        pages=_pages_without_source(card.pages, index),
+        masks=_rows_without_source(card.masks, index),
+        trims=_rows_without_source(card.trims, index),
+        skews=_rows_without_source(card.skews, index),
+    )
+
+
+def _pages_without_source(pages: tuple[PageRow, ...] | None, index: int) -> tuple[PageRow, ...] | None:
+    if not pages:
+        return None
+    kept: list[PageRow] = []
+    for row in pages:
+        if row.source == index:
+            continue
+        source = row.source - 1 if row.source > index else row.source
+        kept.append(replace(row, source=source, position=len(kept)))
+    return tuple(kept) or None
+
+
+def _rows_without_source(rows, index: int):
+    if not rows:
+        return rows
+    kept = []
+    for row in rows:
+        if row.source == index:
+            continue
+        if row.source > index:
+            row = replace(row, source=row.source - 1)
+        kept.append(row)
+    return tuple(kept)
+
+
 def with_series(layout: Layout, series: str) -> Layout:
     template = canonical_template(series)
     return replace(

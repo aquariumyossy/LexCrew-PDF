@@ -32,8 +32,11 @@ from .layout import (
     Trim,
     adopt_output_directory,
     default_layout,
+    drop_missing_originals,
+    is_missing_original_message,
     layout_path,
     load_layout,
+    missing_original_message,
     require_source_file,
     save_layout,
     store_path,
@@ -245,6 +248,25 @@ class Session:
             return
         self.layout = loaded
         self.card_errors = {}
+        self._drop_missing_originals()
+
+    def _drop_missing_originals(self) -> None:
+        """起動時に、消えた原本をカードから外す。号証番号は残し、PDF は開かない。"""
+        if self.folder is None:
+            return
+        cards = []
+        notes: dict[int, str] = {}
+        changed = False
+        for card in self.layout.cards:
+            cleaned, names = drop_missing_originals(self.folder, card)
+            cards.append(cleaned)
+            if names:
+                changed = True
+                notes[card.number] = missing_original_message(names)
+        if not changed:
+            return
+        self.layout = self._with_cards(tuple(cards))
+        self.card_errors = notes
 
     @_locked
     def add_card(self) -> dict:
@@ -469,6 +491,7 @@ class Session:
         self._guard(int(number))
         card = self._card(number)
         stored = self._store(file_path)
+        self._clear_missing_original_note(int(number))
         slots = list(card.slots)
         slot = slots[slot_index]
         insert_at = sum(len(item.files) for item in slots[:slot_index]) + len(slot.files)
@@ -485,6 +508,7 @@ class Session:
         self._guard(int(number))
         card = self._card(number)
         stored = self._store(file_path)
+        self._clear_missing_original_note(int(number))
         slots = list(card.slots)
         files = list(slots[slot_index].files)
         files[file_index] = stored
@@ -503,6 +527,7 @@ class Session:
             return self.view()
         card = self._card(number)
         stored = tuple(self._store(path) for path in paths)
+        self._clear_missing_original_note(int(number))
         slots = list(card.slots)
         start = sum(len(item.files) for item in slots[:slot_index])
         old_count = len(slots[slot_index].files)
@@ -1034,6 +1059,11 @@ class Session:
         except StampFontMissing as exc:
             return {"ok": False, **self.view(), "message": str(exc)}
         with self._lock:
+            notes = {
+                number: message
+                for number, message in self.card_errors.items()
+                if is_missing_original_message(message)
+            }
             self.card_errors = {row["number"]: row["message"] for row in built.errors}
             for row in result["errors"]:
                 number = _number_for_filename(built.jobs, row["filename"])
@@ -1059,6 +1089,8 @@ class Session:
                 if structural.warning:
                     continue
                 self.card_errors[row["number"]] = row["message"]
+            for number, message in notes.items():
+                self.card_errors.setdefault(number, message)
             written = len(result["written"])
             failed = len(result["errors"]) + len(built.errors)
             if written and failed:
@@ -1192,6 +1224,11 @@ class Session:
 
     def _with_cards(self, cards: tuple[Card, ...]) -> Layout:
         return replace(self.layout, cards=cards)
+
+    def _clear_missing_original_note(self, number: int) -> None:
+        message = self.card_errors.get(number, "")
+        if is_missing_original_message(message):
+            del self.card_errors[number]
 
     def _persist(self) -> None:
         if self.folder is not None:

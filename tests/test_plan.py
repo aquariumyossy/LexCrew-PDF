@@ -1,6 +1,7 @@
 """枝番の合体。"""
 import json
 import os
+from pathlib import Path
 
 import fitz
 import pytest
@@ -480,6 +481,61 @@ def test_missing_first_number_is_one_and_bad_values_are_rejected():
     for bad in (0, 10000, 1.5, True, "7"):
         with pytest.raises(ValueError, match="配置ファイルを読めません。"):
             parse_layout({**raw, "firstNumber": bad})
+
+
+def test_generation_ignores_a_missing_original(tmp_path, monkeypatch):
+    missing = tmp_path / "消えた契約書.pdf"
+    also_missing = tmp_path / "無い付属.pdf"
+    kept = tmp_path / "残す.pdf"
+    _pdf(missing, "GONE")
+    _pdf(also_missing, "ALSO")
+    _pdf(kept, "KEEP")
+    session = Session(tmp_path)
+    session.add_file(1, 0, str(missing))
+    session.add_file(2, 0, str(also_missing))
+    session.add_file(2, 0, str(kept))
+    missing.unlink()
+    also_missing.unlink()
+    assert any(Path(stored).name == "消えた契約書.pdf" for stored in session.layout.cards[0].slots[0].files)
+    assert [Path(stored).name for stored in session.layout.cards[1].slots[0].files] == ["無い付属.pdf", "残す.pdf"]
+
+    opened = []
+    import lexcrew_pdf.stamp as stamp
+
+    real_open = stamp.open_source
+
+    def spy(path):
+        name = Path(path).name
+        opened.append(name)
+        if name in {"消えた契約書.pdf", "無い付属.pdf"}:
+            raise AssertionError(path)
+        return real_open(path)
+
+    monkeypatch.setattr(stamp, "open_source", spy)
+    built = jobs_from_layout(session.layout, tmp_path)
+    assert [job.number for job in built.jobs] == [2]
+    assert [Path(source).name for job in built.jobs for source in job.sources] == ["残す.pdf"]
+    assert built.errors == ()
+    assert "消えた契約書.pdf" not in opened
+    assert "無い付属.pdf" not in opened
+
+    written_sources = []
+
+    def fake_pdf(source_paths, *args, **kwargs):
+        written_sources.append(tuple(Path(path).name for path in source_paths))
+        return b"%PDF-1.4\n"
+
+    monkeypatch.setattr("lexcrew_pdf.write.require_stamp_font", lambda *args, **kwargs: None)
+    monkeypatch.setattr("lexcrew_pdf.write.stamp_sources_to_pdf", fake_pdf)
+    opened.clear()
+    result = session.generate()
+    assert "消えた契約書.pdf" not in opened
+    assert "無い付属.pdf" not in opened
+    assert written_sources == [("残す.pdf",)]
+    assert result["ok"] is True
+    assert [row["filename"] for row in result["written"]] == ["甲002 残す.pdf"]
+    assert "Errno 2" not in result["message"]
+    assert "原本を開けません" not in result["message"]
 
 
 def test_unreadable_file_keeps_the_shown_filename(tmp_path):

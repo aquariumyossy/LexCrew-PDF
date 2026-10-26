@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from .layout import Card, Layout, PageRow, Slot, resolve_stored_path
+from .layout import Card, Layout, PageRow, Slot, drop_missing_originals, resolve_stored_path
 from .names import (
     FilenameBook,
     branch_number,
@@ -87,6 +87,8 @@ def jobs_from_layout(layout: Layout, folder: Path) -> PlanBuild:
         blocked=foreign_output_names(folder, layout.last_written),
     )
     for card in layout.cards:
+        # 起動時と同じく、原本が無いファイルは開かず、生成にも載せない。
+        card, _missing = drop_missing_originals(folder, card)
         built, card_errors, card_preserve, card_warnings = _jobs_for_card(
             layout.label_template,
             card,

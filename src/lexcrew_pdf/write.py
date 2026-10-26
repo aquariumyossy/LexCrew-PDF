@@ -102,6 +102,9 @@ def write_jobs(
             if tmp is not None:
                 tmp.unlink(missing_ok=True)
     keep = {row["filename"] for row in written} | failed
+    # 一つでも書けなかった生成は、名前が変わっていても前回の証拠 PDF を消さない。
+    if errors:
+        keep |= set(last_written)
     deleted = _delete_stale(dest, last_written, keep)
     return {
         "written": written,
@@ -130,11 +133,15 @@ def pending_writes(
     filenames: list[str] | tuple[str, ...],
     last_written: tuple[str, ...] | list[str],
     kept: list[tuple[str, str]] | tuple[tuple[str, str], ...],
+    retain: tuple[str, ...] | list[str] = (),
 ) -> dict:
-    """書く前に、置き換えるファイル、消すファイル、残して別名にするファイルを返す。"""
+    """書く前に、置き換えるファイル、消すファイル、残して別名にするファイルを返す。
+
+    retain は失敗する生成が消してはいけない前回分。置き換え一覧には入れない。
+    """
     dest = folder / OUTPUT_DIR_NAME
     owned = set(last_written)
-    planned = set(filenames)
+    planned = set(filenames) | set(retain)
     replace = [name for name in filenames if name in owned and (dest / name).is_file()]
     delete = [name for name in last_written if name not in planned and (dest / name).is_file()]
     return {

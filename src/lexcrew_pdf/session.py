@@ -34,6 +34,7 @@ from .layout import (
     adopt_output_directory,
     check_original,
     default_layout,
+    drop_missing_originals,
     is_missing_original_message,
     layout_path,
     load_layout,
@@ -474,6 +475,12 @@ class Session:
     def add_file(self, number: int, slot_index: int, file_path: str) -> dict:
         self._guard(int(number))
         card = self._card(number)
+        slot = card.slots[int(slot_index)]
+        # 無い原本だけで空に見える枝番へ足すときは、隠れたパスの後ろに足さず、その枝番を差し替える。
+        if slot.files and all(
+            self._original_state(stored) is OriginalState.MISSING for stored in slot.files
+        ):
+            return self.replace_slot(number, slot_index, [file_path])
         stored = self._store(file_path)
         slots = list(card.slots)
         slot = slots[slot_index]
@@ -836,13 +843,27 @@ class Session:
             skews = card.skews
             missing_names = []
             blocked_names = []
+            present = False
             for stored in (item for slot in card.slots for item in slot.files):
                 state = self._original_state(stored)
                 if state is OriginalState.MISSING:
                     missing_names.append(stored_file_name(stored))
                 elif state is OriginalState.UNREADABLE:
                     blocked_names.append(stored_file_name(stored))
-        if missing_names or blocked_names:
+                else:
+                    present = True
+            if missing_names and present and not blocked_names and self.folder is not None:
+                # 無い原本の枝番だけ外して、残った枝番のサムネイルは数える。
+                card, _dropped = drop_missing_originals(self.folder, card)
+                paths = self._paths(card)
+                counts = [len(slot.files) for slot in card.slots]
+                rotations = [slot.rotation for slot in card.slots]
+                offsets = [(slot.stamp_dx, slot.stamp_dy) for slot in card.slots]
+                page_rows = _rows(card.pages)
+                masks = card.masks
+                trims = card.trims
+                skews = card.skews
+        if blocked_names or (missing_names and not present):
             parts = []
             if missing_names:
                 parts.append(missing_original_message(tuple(missing_names)))
@@ -862,7 +883,9 @@ class Session:
         except OSError:
             names = tuple(stored_file_name(path) for path in paths)
             return {"ok": False, "message": unreadable_original_message(names), "slots": []}
-        buckets = resolve_buckets(list(natural), page_rows, counts)
+        buckets = resolve_buckets(
+            list(natural), page_rows, counts, honor_exclusions=bool(missing_names),
+        )
         page_counts = [len(list(buckets.get(index + 1) or [])) for index in range(len(counts))]
         slots = []
         cursor = 0
@@ -1027,7 +1050,9 @@ class Session:
             return {"replace": [], "delete": [], "keep": []}
         built = jobs_from_layout(self.layout, self.folder)
         names = [job.filename for job in built.jobs]
-        return pending_writes(self.folder, names, self.layout.last_written, built.kept)
+        # 失敗する生成の確認では、名前が変わった前回の証拠 PDF を削除予定にしない。
+        retain = self.layout.last_written if built.errors else ()
+        return pending_writes(self.folder, names, self.layout.last_written, built.kept, retain=retain)
 
     def generate(self) -> dict:
         from .plan import jobs_from_layout
@@ -1044,12 +1069,15 @@ class Session:
             style = layout.stamp
             page_numbers = layout.page_numbers
         built = jobs_from_layout(layout, folder)
+        preserve = list(built.preserve)
+        if built.errors:
+            preserve.extend(name for name in last_written if name not in preserve)
         try:
             result = write_jobs(
                 folder,
                 built.jobs,
                 last_written=last_written,
-                preserve=built.preserve,
+                preserve=preserve,
                 grayscale=grayscale,
                 style=style,
                 page_numbers=page_numbers,

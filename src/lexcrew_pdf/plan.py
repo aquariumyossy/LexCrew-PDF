@@ -11,6 +11,7 @@ from .layout import (
     PageRow,
     Slot,
     check_original,
+    drop_missing_originals,
     missing_original_message,
     resolve_stored_path,
     stored_file_name,
@@ -166,22 +167,62 @@ def _jobs_for_card(
     blocked_names = tuple(
         stored_file_name(stored) for stored, state in zip(flat, states) if state is OriginalState.UNREADABLE
     )
-    files_per_slot = [len(slot.files) for slot in card.slots]
-
-    def preserve_names() -> list[str]:
-        # 前回の出力名は、欠落を外す前のカードから決める。
-        return _fallback_names(
-            series, card, files_per_slot, merge_branches=merge_branches, shown=shown, book=book,
+    if blocked_names:
+        # 権限や切れた共有は開かない。号証全体は出さず、前回の名前は外す前のカードで残す。
+        return [], [_card_error(card, unreadable_original_message(blocked_names))], _preserve_names(
+            series, card, merge_branches=merge_branches, shown=shown, book=book,
+        ), []
+    if missing_names:
+        # 原本が無い枝番だけ外す。残った枝番は今の番号のまま出す。除いたページは戻さない。
+        cleaned, _dropped = drop_missing_originals(folder, card)
+        skip = frozenset(
+            index
+            for index, (before, after) in enumerate(zip(card.slots, cleaned.slots))
+            if before.files and not after.files
         )
+        errors = [_card_error(card, missing_original_message(missing_names))]
+        if not _flat_files(cleaned):
+            return [], errors, _preserve_names(
+                series, card, merge_branches=merge_branches, shown=shown, book=book,
+            ), []
+        jobs, more_errors, preserve, warnings = _jobs_for_present_card(
+            series,
+            cleaned,
+            folder,
+            merge_branches=merge_branches,
+            shown=shown,
+            book=book,
+            honor_exclusions=True,
+            skip=skip,
+        )
+        return jobs, [*errors, *more_errors], preserve, warnings
+    return _jobs_for_present_card(
+        series,
+        card,
+        folder,
+        merge_branches=merge_branches,
+        shown=shown,
+        book=book,
+        honor_exclusions=False,
+        skip=frozenset(),
+    )
 
-    if missing_names or blocked_names:
-        # 欠けた号証は、残った原本だけでは出さない。
-        errors = []
-        if missing_names:
-            errors.append(_card_error(card, missing_original_message(missing_names)))
-        if blocked_names:
-            errors.append(_card_error(card, unreadable_original_message(blocked_names)))
-        return [], errors, preserve_names(), []
+
+def _jobs_for_present_card(
+    series: str,
+    card: Card,
+    folder: Path,
+    *,
+    merge_branches: bool,
+    shown: int,
+    book: FilenameBook,
+    honor_exclusions: bool,
+    skip: frozenset[int],
+) -> tuple[list[OutputJob], list[dict], list[str], list[dict]]:
+    flat = _flat_files(card)
+    if not flat:
+        return [], [], [], []
+    files_per_slot = [len(slot.files) for slot in card.slots]
     resolved = tuple(str(resolve_stored_path(folder, stored)) for stored in flat)
     try:
         tilts = [slot.rotation for slot in card.slots for _stored in slot.files]
@@ -190,11 +231,17 @@ def _jobs_for_card(
         )
     except Exception:
         names = tuple(stored_file_name(stored) for stored in flat)
-        return [], [_card_error(card, unreadable_original_message(names))], preserve_names(), []
+        return [], [_card_error(card, unreadable_original_message(names))], _preserve_names(
+            series, card, merge_branches=merge_branches, shown=shown, book=book,
+        ), []
     if not natural:
-        return [], [_card_error(card, "ページがありません。")], preserve_names(), []
+        return [], [_card_error(card, "ページがありません。")], _preserve_names(
+            series, card, merge_branches=merge_branches, shown=shown, book=book,
+        ), []
     rows = _page_rows(card.pages)
-    buckets = resolve_buckets(list(natural), rows, files_per_slot)
+    buckets = resolve_buckets(
+        list(natural), rows, files_per_slot, honor_exclusions=honor_exclusions,
+    )
     jobs: list[OutputJob] = []
     for group in range(GROUP_PRIMARY, len(card.slots) + 1):
         refs = list(buckets.get(group) or [])
@@ -234,11 +281,12 @@ def _jobs_for_card(
     if merge_branches and len(jobs) >= 2 and all(job.pages is not None for job in jobs):
         indexes = [job.slot_index for job in jobs]
         if slots_share_one_file(page_counts):
-            return [_merged_job(series, card, jobs, shown, book)], [], [], []
+            return [_merged_job(series, card, jobs, shown, book, skip=skip)], [], [], []
         missing = [index for index in range(indexes[0], indexes[-1] + 1) if index not in indexes]
+        judged = _card_without_slots(card, skip)
         return [_named_job(job, book, shown, len(card.slots)) for job in jobs], [], [], [{
             "number": card.number,
-            "message": branch_gap_warning(series, card, missing, shown),
+            "message": branch_gap_warning(series, judged, missing, shown),
         }]
     return [_named_job(job, book, shown, len(card.slots)) for job in jobs], [], [], []
 
@@ -390,14 +438,21 @@ def _and_join(labels: list[str]) -> str:
     return "、".join(labels[:-1]) + "と" + labels[-1]
 
 
-def _merged_job(series: str, card: Card, jobs: list[OutputJob], shown: int, book: FilenameBook) -> OutputJob:
+def _merged_job(
+    series: str,
+    card: Card,
+    jobs: list[OutputJob],
+    shown: int,
+    book: FilenameBook,
+    skip: frozenset[int] = frozenset(),
+) -> OutputJob:
     """同じ号証の枝番を、1つの PDF にする。印は各枝番の先頭ページ。"""
     slot_count = len(card.slots)
     first = jobs[0]
     last = jobs[-1]
     start = branch_number(first.slot_index, slot_count)
     end = branch_number(last.slot_index, slot_count)
-    title = merged_document_title(card)
+    title = merged_document_title(card, skip)
     parts = tuple(
         OutputPart(
             stamp=job.stamp,
@@ -456,6 +511,25 @@ def _page_rows(pages: tuple[PageRow, ...] | None) -> list[dict]:
         }
         for row in pages
     ]
+
+
+def _preserve_names(
+    series: str,
+    card: Card,
+    *,
+    merge_branches: bool,
+    shown: int,
+    book: FilenameBook,
+) -> list[str]:
+    """失敗したとき、今のカードから見た出力名。前回分の削除止めは呼び出し側が last_written で行う。"""
+    return _fallback_names(
+        series,
+        card,
+        [len(slot.files) for slot in card.slots],
+        merge_branches=merge_branches,
+        shown=shown,
+        book=book,
+    )
 
 
 def _fallback_names(

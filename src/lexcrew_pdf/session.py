@@ -743,7 +743,9 @@ class Session:
             )
         except ValueError as exc:
             text = str(exc)
-            if "/" not in text and "\\" not in text and "Errno" not in text:
+            if text.startswith("原本が見つかりません：") or text.startswith("原本を開けません。"):
+                raise
+            if "/" not in text and "\\" not in text and "Errno" not in text and not text.isascii():
                 raise
             raise ValueError(_editor_problem_message(self.folder, card) or "原本を開けません。") from None
         except Exception:
@@ -1028,7 +1030,9 @@ class Session:
             skews = card.skews
             missing_names = []
             blocked_names = []
-            for stored in (item for slot in card.slots for item in slot.files):
+            stored_files = tuple(item for slot in card.slots for item in slot.files)
+            folder = self.folder
+            for stored in stored_files:
                 state = self._original_state(stored)
                 if state is OriginalState.MISSING:
                     missing_names.append(stored_file_name(stored))
@@ -1041,6 +1045,16 @@ class Session:
             if blocked_names:
                 parts.append(unreadable_original_message(tuple(blocked_names)))
             return {"ok": False, "message": " ".join(parts), "slots": []}
+        if folder is not None and stored_files:
+            from .plan import _unusable_stored
+
+            bad = _unusable_stored(folder, stored_files, fresh=True)
+            if bad:
+                return {
+                    "ok": False,
+                    "message": missing_original_message(_unique_stored_names(bad)),
+                    "slots": [],
+                }
         trim_map = trim_lookup(trims)
         skew_map = skew_lookup(skews)
         empty_slots = [{"index": index, "pageCount": 0, "thumb": ""} for index in range(len(counts))]
@@ -1806,7 +1820,7 @@ def _filename_only(message: str) -> str:
 def _editor_problem_message(folder: Path | None, card: Card) -> str | None:
     """開けない原本のファイル名だけ。カード内の他の原本は案内に入れない。"""
     from .layout import resolve_stored_path
-    from .stamp import open_source
+    from .stamp import open_source, source_is_unusable
 
     if folder is None:
         return None
@@ -1821,9 +1835,18 @@ def _editor_problem_message(folder: Path | None, card: Card) -> str | None:
         if state is OriginalState.UNREADABLE:
             blocked.append(name)
             continue
+        try:
+            path = resolve_stored_path(folder, stored)
+        except ValueError:
+            blocked.append(name)
+            continue
+        if source_is_unusable(str(path), fresh=True):
+            if name not in missing:
+                missing.append(name)
+            continue
         document = None
         try:
-            document = open_source(str(resolve_stored_path(folder, stored)))
+            document = open_source(str(path))
         except FileNotFoundError:
             missing.append(name)
         except Exception:

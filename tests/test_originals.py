@@ -565,8 +565,7 @@ def test_editor_and_card_view_do_not_expose_the_originals_path(tmp_path):
     api = Api(session)
     result = api.editor(1, 0)
     assert result["ok"] is False
-    assert result["message"].startswith("原本を開けません。")
-    assert "契約書.pdf" in result["message"]
+    assert result["message"] == "原本が見つかりません：契約書.pdf"
     assert str(originals_dir()) not in result["message"]
     assert str(copied) not in result["message"]
     assert "Errno" not in result["message"]
@@ -746,7 +745,7 @@ def test_editor_lists_only_the_file_that_cannot_be_opened(tmp_path):
     broken.write_bytes(b"not a pdf")
     again = api.editor(1, 0)
     assert again["ok"] is False
-    assert again["message"] == "原本を開けません。残す.pdf"
+    assert again["message"] == "原本が見つかりません：残す.pdf"
     assert "追加.pdf" not in again["message"]
     assert str(broken) not in again["message"]
     assert "Errno" not in again["message"]
@@ -872,6 +871,61 @@ def test_encrypted_and_empty_originals_leave_previous_pdfs(tmp_path, monkeypatch
     assert list(dest.glob("*.pdf")) == [dest / "甲001 契約.pdf"]
     assert blank["message"] == "原本が見つかりません：空.pdf"
     assert "削除したファイル" not in blank["message"]
+
+
+def test_encrypted_original_message_stays_on_refresh(tmp_path, monkeypatch):
+    import base64
+
+    from lexcrew_pdf.window import Api, _editor_error
+
+    good = tmp_path / "契約.pdf"
+    secret = tmp_path / "秘密.pdf"
+    _pdf(good, ["BODY"])
+    _encrypted(secret)
+    session = Session(tmp_path)
+    _use_font(monkeypatch)
+    session.add_file(1, 0, str(good))
+    session.set_title(1, "契約", 0)
+    assert session.generate()["ok"] is True
+    dest = tmp_path / "LexCrew-PDF-Downloads"
+    previous = (dest / "甲001 契約.pdf").read_bytes()
+    session.add_file(2, 0, str(secret))
+    api = Api(session)
+    media = api.media(2)
+    assert media["ok"] is False
+    assert media["slots"] == []
+    assert media["message"] == "原本が見つかりません：秘密.pdf"
+    assert "document closed" not in media["message"]
+    thumb = api.media(1)
+    assert thumb.get("ok") is not False
+    assert base64.b64decode(thumb["slots"][0]["thumb"]).startswith(b"\xff\xd8")
+    blocked = api.generate()
+    assert blocked["ok"] is False
+    assert blocked["written"] == []
+    assert blocked["message"] == "原本が見つかりません：秘密.pdf"
+    assert (dest / "甲001 契約.pdf").read_bytes() == previous
+    assert list(dest.glob("*.pdf")) == [dest / "甲001 契約.pdf"]
+    editor = api.editor(2, 0)
+    assert editor["ok"] is False
+    assert editor["message"] == "原本が見つかりません：秘密.pdf"
+    assert "document closed" not in editor["message"]
+    session.rotate(2, 0)
+    session.add_branch(2)
+    again = api.media(2)
+    assert again["ok"] is False
+    assert again["slots"] == []
+    assert again["message"] == "原本が見つかりません：秘密.pdf"
+    assert "document closed" not in again["message"]
+    assert (dest / "甲001 契約.pdf").read_bytes() == previous
+    assert list(dest.glob("*.pdf")) == [dest / "甲001 契約.pdf"]
+    session.remove_file(2, 0, 0)
+    cleared = api.media(2)
+    assert "原本が見つかりません" not in str(cleared.get("message", ""))
+    assert "document closed" not in str(cleared)
+    assert session.view()["cards"][1]["message"] == ""
+    assert _editor_error(ValueError("document closed or encrypted")) == "原本を開けません。"
+    assert _editor_error(ValueError("原本が見つかりません：秘密.pdf")) == "原本が見つかりません：秘密.pdf"
+    assert _editor_error(ValueError("原本を開けません。秘密.pdf")) == "原本を開けません。秘密.pdf"
 
 
 def test_a_later_stamp_failure_does_not_replace_the_earlier_pdf(tmp_path, monkeypatch):

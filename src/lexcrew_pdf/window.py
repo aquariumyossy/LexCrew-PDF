@@ -369,7 +369,7 @@ class Api:
         try:
             return self.session.media(int(number))
         except ValueError as exc:
-            return {"ok": False, "message": str(exc), "slots": []}
+            return {"ok": False, "message": _editor_error(exc), "slots": []}
         except OSError:
             return {"ok": False, "message": "原本を開けません。", "slots": []}
 
@@ -686,7 +686,11 @@ def _editor_error(exc: BaseException) -> str:
         return "配置ファイルを読めません。"
     if isinstance(exc, ValueError):
         text = str(exc)
+        if text.startswith("原本が見つかりません：") or text.startswith("原本を開けません。"):
+            return text
         if "/" not in text and "\\" not in text and "Errno" not in text:
+            if text.isascii():
+                return "原本を開けません。"
             return text
     name = _exception_file_name(exc)
     if isinstance(exc, FileNotFoundError) and name:

@@ -917,6 +917,13 @@ def test_edit_after_unreadable_boot_reloads_the_saved_layout(monkeypatch, tmp_pa
     finally:
         output.chmod(0o755)
     assert layout_file.read_bytes() == before
+    refused = session.add_card()
+    assert refused["ok"] is False
+    assert refused["message"] == "配置を読み直しました。もう一度操作してください。"
+    assert layout_file.read_bytes() == before
+    shown = session.view()
+    assert shown["cards"][0]["title"] == "契約書"
+    assert shown["message"] == ""
     session.add_card()
     saved = json.loads(layout_file.read_text(encoding="utf-8"))
     first = saved["cards"][0]
@@ -950,6 +957,120 @@ def test_second_confirm_shows_the_names_that_will_be_written():
     assert "変更" not in calls[1]
     assert "甲001 契約.pdf" in calls[0]
     assert "甲001 契約.pdf" in calls[1]
+
+
+def test_stale_unshown_layout_is_not_deleted_or_cleared(monkeypatch, tmp_path):
+    first = tmp_path / "a.pdf"
+    second = tmp_path / "b.pdf"
+    _pdf(first, ["A"])
+    _pdf(second, ["B"])
+    case = tmp_path / "case"
+    case.mkdir()
+    prepared = Session(case)
+    prepared.add_file(1, 0, str(first))
+    prepared.set_title(1, "一番", 0)
+    prepared.add_file(2, 0, str(second))
+    prepared.set_title(2, "二番", 0)
+    output = case / "LexCrew-PDF-Downloads"
+    layout_file = output / "layout.json"
+    before = layout_file.read_bytes()
+    output.chmod(0)
+    monkeypatch.setenv("LEXCREW_FOLDER", str(case))
+    try:
+        session = app_window.boot()
+        assert [card["title"] for card in session.view()["cards"][:2]] == ["", ""]
+    finally:
+        output.chmod(0o755)
+    api = app_window.Api(session)
+    refused = api.delete_slot(2, 0)
+    assert refused["ok"] is False
+    assert refused["message"] == "配置を読み直しました。もう一度操作してください。"
+    assert [card["title"] for card in refused["cards"][:2]] == ["一番", "二番"]
+    assert layout_file.read_bytes() == before
+    refused_clear = api.clear()
+    assert refused_clear["ok"] is False
+    assert refused_clear["message"] == "配置を読み直しました。もう一度操作してください。"
+    assert layout_file.read_bytes() == before
+    refused_choose = api.choose_pdf(1, 0)
+    assert refused_choose["ok"] is False
+    assert refused_choose["message"] == "配置を読み直しました。もう一度操作してください。"
+    assert layout_file.read_bytes() == before
+    shown = api.state()
+    assert [card["title"] for card in shown["cards"][:2]] == ["一番", "二番"]
+    api.delete_slot(2, 0)
+    reloaded = Session(case)
+    titles = [card.slots[0].title for card in reloaded.layout.cards if card.slots[0].files]
+    assert titles == ["一番"]
+
+
+def test_stale_generate_writes_nothing(monkeypatch, tmp_path):
+    source = tmp_path / "a.pdf"
+    _pdf(source, ["A"])
+    case = tmp_path / "case"
+    case.mkdir()
+    prepared = Session(case)
+    prepared.add_file(1, 0, str(source))
+    prepared.set_title(1, "一番", 0)
+    output = case / "LexCrew-PDF-Downloads"
+    layout_file = output / "layout.json"
+    before = layout_file.read_bytes()
+    output.chmod(0)
+    monkeypatch.setenv("LEXCREW_FOLDER", str(case))
+    try:
+        session = app_window.boot()
+    finally:
+        output.chmod(0o755)
+    refused = app_window.Api(session).generate()
+    assert refused["ok"] is False
+    assert refused["message"] == "配置を読み直しました。もう一度操作してください。"
+    assert refused["written"] == []
+    assert layout_file.read_bytes() == before
+    assert list(output.glob("*.pdf")) == []
+
+
+def _assert_layout_banner(result):
+    assert result["ok"] is False
+    assert result["message"] == "配置ファイルを読めません。"
+    assert "Errno" not in result["message"]
+    assert "PermissionError" not in result["message"]
+
+
+def test_unreadable_layout_uses_one_banner(monkeypatch, tmp_path):
+    case = tmp_path / "case"
+    output = case / "LexCrew-PDF-Downloads"
+    output.mkdir(parents=True)
+    layout_file = output / "layout.json"
+    layout_file.write_text("{}", encoding="utf-8")
+    before = layout_file.read_bytes()
+    output.chmod(0)
+    monkeypatch.setenv("LEXCREW_FOLDER", str(case))
+    try:
+        session = app_window.boot()
+        api = app_window.Api(session)
+        _assert_layout_banner(api.preview_generate())
+        _assert_layout_banner(api.generate())
+        _assert_layout_banner(api.add_card())
+        _assert_layout_banner(api.delete_slot(2, 0))
+        _assert_layout_banner(api.move_slot(1, 0, None))
+        _assert_layout_banner(api.open_editor(1, 0))
+        _assert_layout_banner(api.choose_pdf(1, 0))
+        _assert_layout_banner(api.clear())
+    finally:
+        output.chmod(0o755)
+    assert layout_file.read_bytes() == before
+
+    readable = tmp_path / "empty-json"
+    empty_output = readable / "LexCrew-PDF-Downloads"
+    empty_output.mkdir(parents=True)
+    empty_layout = empty_output / "layout.json"
+    empty_layout.write_text("{}", encoding="utf-8")
+    empty_session = Session(readable)
+    empty_api = app_window.Api(empty_session)
+    _assert_layout_banner(empty_api.preview_generate())
+    _assert_layout_banner(empty_api.generate())
+    _assert_layout_banner(empty_api.delete_slot(1, 0))
+    _assert_layout_banner(empty_api.clear())
+    assert empty_layout.read_text(encoding="utf-8") == "{}"
 
 
 def test_boot_uses_lexcrew_folder_when_set(monkeypatch, tmp_path):

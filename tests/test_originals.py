@@ -1580,3 +1580,119 @@ def test_comma_in_a_file_name_stays_in_the_card_message(tmp_path):
     cleared = session.view()["cards"][0]["message"]
     assert "原本が見つかりません" not in cleared
     assert "請求書、領収書.pdf" not in cleared
+
+
+def _editor_pages(kept, excluded, group):
+    """edit.js の commit。出すページを先に、除くページを後に書く。"""
+    pages = [{"source": source, "page": 0, "part": 0, "group": group} for source in kept]
+    pages.extend({"source": source, "page": 0, "part": 0, "group": 0} for source in excluded)
+    return pages
+
+
+def test_replacing_an_excluded_middle_file_stays_inside_its_branch(tmp_path, monkeypatch):
+    first = tmp_path / "a.pdf"
+    middle = tmp_path / "mid.pdf"
+    third = tmp_path / "c.pdf"
+    branch = tmp_path / "d.pdf"
+    new = tmp_path / "new.pdf"
+    _pdf(first, ["A"])
+    _pdf(middle, ["MID"])
+    _pdf(third, ["C"])
+    _pdf(branch, ["D"])
+    _pdf(new, ["BODY-NEW"])
+    session = Session(tmp_path)
+    session.add_file(1, 0, str(first))
+    session.add_file(1, 0, str(middle))
+    session.add_file(1, 0, str(third))
+    session.add_branch(1)
+    session.add_file(1, 1, str(branch))
+    session.set_pages(1, _editor_pages([0, 2], [1], 1), 0)
+    saved = session.layout.cards[0].pages
+    assert saved is not None
+    assert [(row.source, row.group) for row in saved] == [(3, 2), (0, 1), (2, 1), (1, 0)]
+    session.replace_file(1, 0, 1, str(new))
+    _use_font(monkeypatch)
+    result = session.generate()
+    assert result["ok"] is True
+    written = list((tmp_path / "LexCrew-PDF-Downloads").glob("*.pdf"))
+    assert len(written) == 1
+    texts = _texts(written[0])
+    assert len(texts) == 4
+    assert "A" in texts[0] and "甲第１号証の１" in texts[0]
+    assert "BODY-NEW" in texts[1] and "甲第１号証" not in texts[1]
+    assert "C" in texts[2]
+    assert "D" in texts[3] and "甲第１号証の２" in texts[3]
+
+
+def test_replacing_an_excluded_last_file_stays_inside_its_branch(tmp_path, monkeypatch):
+    first = tmp_path / "a.pdf"
+    middle = tmp_path / "mid.pdf"
+    last = tmp_path / "c.pdf"
+    branch = tmp_path / "d.pdf"
+    new = tmp_path / "new.pdf"
+    _pdf(first, ["A"])
+    _pdf(middle, ["MID"])
+    _pdf(last, ["C"])
+    _pdf(branch, ["D"])
+    _pdf(new, ["BODY-NEW"])
+    session = Session(tmp_path)
+    session.add_file(1, 0, str(first))
+    session.add_file(1, 0, str(middle))
+    session.add_file(1, 0, str(last))
+    session.add_branch(1)
+    session.add_file(1, 1, str(branch))
+    session.set_pages(1, _editor_pages([0, 1], [2], 1), 0)
+    session.replace_file(1, 0, 2, str(new))
+    _use_font(monkeypatch)
+    result = session.generate()
+    assert result["ok"] is True
+    texts = _texts(next((tmp_path / "LexCrew-PDF-Downloads").glob("*.pdf")))
+    assert "A" in texts[0] and "甲第１号証の１" in texts[0]
+    assert "MID" in texts[1]
+    assert "BODY-NEW" in texts[2] and "甲第１号証" not in texts[2]
+    assert "D" in texts[3] and "甲第１号証の２" in texts[3]
+
+
+def test_replacing_an_excluded_middle_file_keeps_its_place_on_one_card(tmp_path, monkeypatch):
+    first = tmp_path / "a.pdf"
+    middle = tmp_path / "mid.pdf"
+    third = tmp_path / "c.pdf"
+    new = tmp_path / "new.pdf"
+    _pdf(first, ["A"])
+    _pdf(middle, ["MID"])
+    _pdf(third, ["C"])
+    _pdf(new, ["BODY-NEW"])
+    session = Session(tmp_path)
+    session.add_file(1, 0, str(first))
+    session.add_file(1, 0, str(middle))
+    session.add_file(1, 0, str(third))
+    session.set_pages(1, _editor_pages([0, 2], [1], 1), 0)
+    saved = session.layout.cards[0].pages
+    assert saved is not None
+    assert [(row.source, row.group) for row in saved] == [(0, 1), (2, 1), (1, 0)]
+    session.replace_file(1, 0, 1, str(new))
+    _use_font(monkeypatch)
+    result = session.generate()
+    assert result["ok"] is True
+    texts = _texts(next((tmp_path / "LexCrew-PDF-Downloads").glob("*.pdf")))
+    assert "A" in texts[0] and "甲第１号証" in texts[0]
+    assert "BODY-NEW" in texts[1] and "甲第１号証" not in texts[1]
+    assert "C" in texts[2]
+
+
+def test_same_display_name_lists_the_unusable_file_once(tmp_path):
+    left = tmp_path / "a"
+    right = tmp_path / "b"
+    left.mkdir()
+    right.mkdir()
+    good = left / "契約.pdf"
+    secret = right / "契約.pdf"
+    _pdf(good, ["BODY"])
+    _encrypted(secret)
+    session = Session(tmp_path)
+    session.add_file(1, 0, str(good))
+    session.add_file(1, 0, str(secret))
+    blocked = session.generate()
+    assert blocked["ok"] is False
+    assert blocked["cards"][0]["message"] == "原本が見つかりません：契約.pdf"
+    assert blocked["message"].count("契約.pdf") == 1

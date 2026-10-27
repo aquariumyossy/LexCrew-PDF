@@ -16,7 +16,7 @@ from .layout import (
     require_source_file,
     unreadable_original_message,
 )
-from .session import Session, downloads_dir
+from .session import Session, _LAYOUT_RETRY, downloads_dir
 
 # ハンドルを関数の中だけに置くと、ガベージコレクションでミューテックスが外れる。
 _instance_handle = None
@@ -273,18 +273,24 @@ class Api:
         return self._run(lambda: self.session.remove_file(int(number), int(slot_index), int(file_index)))
 
     def delete_slot(self, number: int, slot_index: int) -> dict:
-        before = self.session.editor_identity()
-        view = self._run(lambda: self.session.delete_slot(int(number), int(slot_index)))
-        after = self.session.editor_identity()
+        try:
+            before = self.session.editor_identity()
+            view = self._run(lambda: self.session.delete_slot(int(number), int(slot_index)))
+            after = self.session.editor_identity()
+        except OSError as exc:
+            return self._layout_banner(exc)
         if after and before != after:
             self._notify_editor(f"window.retarget({int(after['number'])}, {int(after['slot'])})")
         return view
 
     def move_slot(self, number: int, slot_index: int, before_number=None) -> dict:
-        before = self.session.editor_identity()
-        target = None if before_number is None else int(before_number)
-        view = self._run(lambda: self.session.move_slot(int(number), int(slot_index), target))
-        after = self.session.editor_identity()
+        try:
+            before = self.session.editor_identity()
+            target = None if before_number is None else int(before_number)
+            view = self._run(lambda: self.session.move_slot(int(number), int(slot_index), target))
+            after = self.session.editor_identity()
+        except OSError as exc:
+            return self._layout_banner(exc)
         if after and before != after:
             self._notify_editor(f"window.retarget({int(after['number'])}, {int(after['slot'])})")
         return view
@@ -305,6 +311,11 @@ class Api:
             self.session.ensure_editable(int(number))
         except ValueError as exc:
             return {**self.session.view(), "ok": False, "message": str(exc)}
+        except OSError as exc:
+            return self._layout_banner(exc)
+        if self.session._view_is_stale:
+            refreshed = self.session.view()
+            return {**refreshed, "ok": False, "message": _LAYOUT_RETRY}
         chosen = self._window.create_file_dialog(
             webview.FileDialog.OPEN,
             allow_multiple=True,
@@ -332,6 +343,8 @@ class Api:
             self.session.begin_edit(number, slot_index)
         except ValueError as exc:
             return {**self.session.view(), "ok": False, "message": str(exc)}
+        except OSError as exc:
+            return self._layout_banner(exc)
         try:
             self._present_editor(number, slot_index)
         except Exception:
@@ -398,11 +411,16 @@ class Api:
         return result
 
     def clear(self) -> dict:
+        try:
+            view = self.session.clear()
+        except OSError as exc:
+            return self._layout_banner(exc)
+        if view.get("ok") is False:
+            return view
         editor = None
         with self.session._lock:
             editor = self._editor_window
             self._editor_window = None
-            view = self.session.clear()
         if editor is not None:
             try:
                 editor.destroy()
@@ -410,11 +428,14 @@ class Api:
                 pass
         return view
 
+    def _layout_banner(self, exc: BaseException) -> dict:
+        return {**self.session.view(), "ok": False, "message": _editor_error(exc)}
+
     def _run(self, fn):
         try:
             return fn()
         except Exception as exc:
-            return {**self.session.view(), "ok": False, "message": _editor_error(exc)}
+            return self._layout_banner(exc)
 
     def _save_on_close(self) -> None:
         self._closing = True
@@ -661,6 +682,8 @@ def _preview_token(preview) -> str:
 
 def _editor_error(exc: BaseException) -> str:
     """編集画面の失敗。原本置き場の絶対パスや Errno は出さない。"""
+    if "配置ファイルを読めません。" in str(exc):
+        return "配置ファイルを読めません。"
     if isinstance(exc, ValueError):
         text = str(exc)
         if "/" not in text and "\\" not in text and "Errno" not in text:

@@ -91,18 +91,34 @@ class OpenEditor:
     slot_index: int
 
 
+_LAYOUT_RETRY = "配置を読み直しました。もう一度操作してください。"
+
+
 def _allow_unread(method):
     method._allows_unread = True
+    return method
+
+
+def _allow_stale(method):
+    method._allows_stale = True
     return method
 
 
 def _locked(method):
     def call(self, *args, **kwargs):
         with self._lock:
-            self._prepare_layout()
-            if self._layout_unread and not getattr(method, "_allows_unread", False):
-                raise OSError(13, "配置ファイルを読めません。")
-            return method(self, *args, **kwargs)
+            self._lock_depth += 1
+            try:
+                self._prepare_layout()
+                if self._layout_unread and not getattr(method, "_allows_unread", False):
+                    raise OSError(13, "配置ファイルを読めません。")
+                if self._view_is_stale and not getattr(method, "_allows_stale", False):
+                    # ネストした view は、まだ画面に出していない印を消さない。
+                    refreshed = self.view()
+                    return {**refreshed, "ok": False, "message": _LAYOUT_RETRY}
+                return method(self, *args, **kwargs)
+            finally:
+                self._lock_depth -= 1
 
     return call
 
@@ -144,6 +160,8 @@ class Session:
         self.card_errors: dict[int, str] = {}
         self._blocked_originals: dict[int, tuple[str, ...]] = {}
         self._layout_unread = False
+        self._view_is_stale = False
+        self._lock_depth = 0
         self.open_editor: OpenEditor | None = None
         self._lock = threading.RLock()
         if folder is not None:
@@ -151,7 +169,10 @@ class Session:
 
     @_locked
     @_allow_unread
+    @_allow_stale
     def view(self) -> dict:
+        if self._lock_depth == 1:
+            self._view_is_stale = False
         output = self.folder / OUTPUT_DIR_NAME if self.folder else None
         editing = self.open_editor
         book = self._filename_book()
@@ -190,6 +211,7 @@ class Session:
         return self.view()
 
     @_locked
+    @_allow_stale
     def editor_identity(self) -> dict | None:
         editing = self.open_editor
         if editing is None:
@@ -197,6 +219,7 @@ class Session:
         return {"number": editing.number, "slot": editing.slot_index}
 
     @_locked
+    @_allow_stale
     def edit_context(self) -> dict:
         editing = self.open_editor
         if editing is None:
@@ -233,6 +256,7 @@ class Session:
         }
 
     @_locked
+    @_allow_stale
     def ensure_editable(self, number: int) -> None:
         self._guard(int(number))
 
@@ -577,7 +601,13 @@ class Session:
         files[file_index] = stored
         flat = sum(len(item.files) for item in slots[:slot_index]) + file_index
         owned = [row for row in (card.pages or ()) if row.source == flat]
-        anchor = _replacement_place(owned, slot_index, card.pages, flat)
+        anchor = _replacement_place(
+            owned,
+            slot_index,
+            card.pages,
+            flat,
+            [len(item.files) for item in slots],
+        )
         slots[slot_index] = replace(slots[slot_index], files=tuple(files))
         masks = _drop_sources(card.masks, flat, 1, 1)
         trims = _drop_sources(card.trims, flat, 1, 1)
@@ -1209,6 +1239,9 @@ class Session:
             if self._layout_unread:
                 self.notice = "配置ファイルを読めません。"
                 return {"ok": False, **self.view(), "message": self.notice}
+            if self._view_is_stale:
+                refreshed = self.view()
+                return {"ok": False, "written": [], **refreshed, "message": _LAYOUT_RETRY}
             folder = self.folder
             layout = self.layout
             blocked = generation_blockers(layout, folder)
@@ -1314,12 +1347,11 @@ class Session:
                 for stored in _flat_card_files(card)
                 if stored_file_name(stored) in extra
                 and check_original(folder, stored) is OriginalState.PRESENT
+                and self._stored_still_blocked(stored)
             )
             if remembered:
                 self._blocked_originals[number] = remembered
-                self.card_errors[number] = missing_original_message(
-                    tuple(stored_file_name(stored) for stored in remembered)
-                )
+                self.card_errors[number] = missing_original_message(_unique_stored_names(remembered))
         view = self.view()
         listed: list[str] = []
         for _number, names in blocked:
@@ -1550,7 +1582,7 @@ class Session:
         )
         if kept:
             self._blocked_originals[card.number] = kept
-            updated = missing_original_message(tuple(stored_file_name(stored) for stored in kept))
+            updated = missing_original_message(_unique_stored_names(kept))
             self.card_errors[card.number] = updated
             return updated
         self._blocked_originals.pop(card.number, None)
@@ -1634,6 +1666,7 @@ class Session:
         self.card_errors = {}
         self._blocked_originals = {}
         self._layout_unread = False
+        self._view_is_stale = True
         if self.notice == "配置ファイルを読めません。":
             self.notice = ""
         if adopted != loaded:
@@ -1714,11 +1747,12 @@ def _natural_parts(folder: Path | None, stored: str, split: bool, tilt: int) -> 
     return tuple(natural)
 
 
-def _replacement_place(owned, slot_index: int, pages, source: int) -> tuple[int, int] | None:
+def _replacement_place(owned, slot_index: int, pages, source: int, files_per_slot) -> tuple[int, int] | None:
     """差替えた原本を出す位置。除いた行の位置は使わない。
 
     出す行が残っていれば、その最初の位置へ戻す。全部除いてあるときは、
-    他の出す原本の並び（編集画面が先に書く順）で同じ場所へ入れる。
+    同じ枝番の出す原本の並びで、差し替えたファイルがあった場所へ入れる。
+    別の枝番が位置 0 でも、そこへは動かさない。
     """
     if not owned:
         return None
@@ -1727,9 +1761,10 @@ def _replacement_place(owned, slot_index: int, pages, source: int) -> tuple[int,
         earliest = min(included, key=lambda row: row.position)
         return earliest.position, earliest.group
     group = slot_index + 1
+    start, end = _slot_source_span(files_per_slot, slot_index)
     others = [
         row for row in (pages or ())
-        if row.source != source and row.group != GROUP_EXCLUDED
+        if start <= row.source < end and row.source != source and row.group != GROUP_EXCLUDED
     ]
     later = [row for row in others if row.source > source]
     if later:
@@ -1738,6 +1773,15 @@ def _replacement_place(owned, slot_index: int, pages, source: int) -> tuple[int,
     if earlier:
         return max(row.position for row in earlier) + 1, group
     return 0, group
+
+
+def _unique_stored_names(stored_paths) -> tuple[str, ...]:
+    names: list[str] = []
+    for stored in stored_paths:
+        name = stored_file_name(stored)
+        if name not in names:
+            names.append(name)
+    return tuple(names)
 
 
 def _pages_at_replaced_position(pages, source: int, natural, anchor: int, group: int):

@@ -44,20 +44,27 @@ def write_jobs(
     written: list[dict] = []
     errors: list[dict] = []
     replaced: list[str] = []
-    failed = set(preserve)
     owned = set(last_written)
+    rendered: list[tuple[OutputJob, bytes]] = []
     for job in jobs:
         _checked_output_path(dest, job.filename)
         target = dest / job.filename
-        if target.is_file() and job.filename not in owned:
-            failed.add(job.filename)
+        try:
+            exists = target.is_file()
+        except OSError as exc:
+            errors.append({
+                "filename": job.filename,
+                "stampLabel": job.stamp,
+                "message": _short_error(exc),
+            })
+            continue
+        if exists and job.filename not in owned:
             errors.append({
                 "filename": job.filename,
                 "stampLabel": job.stamp,
                 "message": "同じ名前のファイルがあるため、書けませんでした。",
             })
             continue
-        tmp: Path | None = None
         try:
             data = stamp_sources_to_pdf(
                 job.sources,
@@ -77,32 +84,52 @@ def write_jobs(
                 draw_stamp=stamp_enabled,
                 fit_stamp=fit_stamp,
             )
-            dest.mkdir(parents=True, exist_ok=True)
-            target = _checked_output_path(dest, job.filename)
-            replacing = target.is_file()
-            tmp = dest / f"{job.filename}.writing"
-            tmp.write_bytes(data)
-            os.replace(tmp, target)
-            if replacing:
-                replaced.append(job.filename)
-            written.append({
-                "filename": job.filename,
-                "stampLabel": job.stamp,
-            })
         except StampFontMissing:
             raise
         except Exception as exc:
-            failed.add(job.filename)
             errors.append({
                 "filename": job.filename,
                 "stampLabel": job.stamp,
                 "message": _short_error(exc),
             })
-        finally:
-            if tmp is not None:
-                tmp.unlink(missing_ok=True)
-    keep = {row["filename"] for row in written} | failed
-    deleted = _delete_stale(dest, last_written, keep)
+            continue
+        rendered.append((job, data))
+    # 一つでも失敗したら、置き換えも削除もしない。前回の証拠 PDF を残す。
+    if errors:
+        return {
+            "written": [],
+            "errors": errors,
+            "keep": tuple(last_written),
+            "replaced": (),
+            "deleted": (),
+        }
+    if not rendered:
+        written, replaced = [], []
+    else:
+        try:
+            written, replaced = _publish_rendered(dest, rendered)
+        except _PublishFailed as failed:
+            # 途中まで置いたファイルは戻してある。前回分の記録はそのまま。
+            return {
+                "written": [],
+                "errors": [{
+                    "filename": failed.job.filename if failed.job is not None else "",
+                    "stampLabel": failed.job.stamp if failed.job is not None else "",
+                    "message": _short_error(failed.cause),
+                }],
+                "keep": tuple(last_written),
+                "replaced": (),
+                "deleted": (),
+            }
+    keep = {row["filename"] for row in written} | set(preserve)
+    deleted, stale_failed = _delete_stale(dest, last_written, keep)
+    for name in stale_failed:
+        errors.append({
+            "filename": name,
+            "stampLabel": "",
+            "message": f"削除できませんでした。{name}",
+        })
+        keep.add(name)
     return {
         "written": written,
         "errors": errors,
@@ -110,6 +137,77 @@ def write_jobs(
         "replaced": tuple(replaced),
         "deleted": tuple(deleted),
     }
+
+
+class _PublishFailed(Exception):
+    def __init__(self, cause: OSError, job: OutputJob | None) -> None:
+        self.cause = cause
+        self.job = job
+
+
+def _publish_rendered(dest: Path, rendered: list[tuple[OutputJob, bytes]]) -> tuple[list[dict], list[str]]:
+    """全部の PDF を置いてから戻る。一つでも失敗したら、置いた分を戻して上げる。"""
+    staged: list[tuple[OutputJob, Path, Path]] = []
+    published: list[tuple[OutputJob, Path, Path | None]] = []
+    current: OutputJob | None = None
+    try:
+        dest.mkdir(parents=True, exist_ok=True)
+        for job, data in rendered:
+            current = job
+            target = _checked_output_path(dest, job.filename)
+            tmp = dest / f"{job.filename}.writing"
+            tmp.write_bytes(data)
+            staged.append((job, target, tmp))
+        for job, target, tmp in staged:
+            current = job
+            backup: Path | None = None
+            if target.is_file():
+                backup = _rollback_path(dest, job.filename)
+                os.replace(target, backup)
+            try:
+                os.replace(tmp, target)
+            except OSError:
+                if backup is not None and backup.is_file():
+                    os.replace(backup, target)
+                raise
+            published.append((job, target, backup))
+    except OSError as exc:
+        _restore_published(published)
+        raise _PublishFailed(exc, current) from exc
+    finally:
+        for _job, _target, tmp in staged:
+            tmp.unlink(missing_ok=True)
+    written: list[dict] = []
+    replaced: list[str] = []
+    for job, _target, backup in published:
+        if backup is not None:
+            try:
+                backup.unlink()
+            except OSError:
+                pass
+            replaced.append(job.filename)
+        written.append({"filename": job.filename, "stampLabel": job.stamp})
+    return written, replaced
+
+
+def _restore_published(published: list[tuple[OutputJob, Path, Path | None]]) -> None:
+    for _job, target, backup in reversed(published):
+        try:
+            if backup is None:
+                target.unlink(missing_ok=True)
+            elif backup.is_file():
+                os.replace(backup, target)
+        except OSError:
+            continue
+
+
+def _rollback_path(dest: Path, filename: str) -> Path:
+    candidate = dest / f".{filename}.rollback"
+    index = 2
+    while candidate.exists():
+        candidate = dest / f".{filename}.rollback{index}"
+        index += 1
+    return candidate
 
 
 def foreign_output_names(folder: Path, last_written: tuple[str, ...] | list[str]) -> set[str]:
@@ -130,11 +228,15 @@ def pending_writes(
     filenames: list[str] | tuple[str, ...],
     last_written: tuple[str, ...] | list[str],
     kept: list[tuple[str, str]] | tuple[tuple[str, str], ...],
+    retain: tuple[str, ...] | list[str] = (),
 ) -> dict:
-    """書く前に、置き換えるファイル、消すファイル、残して別名にするファイルを返す。"""
+    """書く前に、置き換えるファイル、消すファイル、残して別名にするファイルを返す。
+
+    retain は失敗する生成が消してはいけない前回分。置き換え一覧には入れない。
+    """
     dest = folder / OUTPUT_DIR_NAME
     owned = set(last_written)
-    planned = set(filenames)
+    planned = set(filenames) | set(retain)
     replace = [name for name in filenames if name in owned and (dest / name).is_file()]
     delete = [name for name in last_written if name not in planned and (dest / name).is_file()]
     return {
@@ -153,10 +255,11 @@ def _checked_output_path(dest: Path, filename: str) -> Path:
     return path
 
 
-def _delete_stale(dest: Path, last_written, keep: set[str]) -> list[str]:
+def _delete_stale(dest: Path, last_written, keep: set[str]) -> tuple[list[str], list[str]]:
     if not dest.is_dir():
-        return []
+        return [], []
     deleted: list[str] = []
+    failed: list[str] = []
     for name in last_written:
         if name in keep:
             continue
@@ -164,17 +267,34 @@ def _delete_stale(dest: Path, last_written, keep: set[str]) -> list[str]:
             path = _checked_output_path(dest, name)
         except ValueError:
             continue
-        if path.is_file():
-            path.unlink()
-            deleted.append(name)
+        try:
+            if path.is_file():
+                path.unlink()
+                deleted.append(name)
+        except OSError:
+            failed.append(name)
     for path in list(dest.glob("*.writing")):
-        if path.is_file():
-            path.unlink()
-    return deleted
+        try:
+            if path.is_file():
+                path.unlink()
+        except OSError:
+            pass
+    return deleted, failed
 
 
 def _short_error(exc: Exception) -> str:
-    detail = str(exc).strip().replace("\n", " ")
+    from .layout import missing_original_message, unreadable_original_message
+
+    filename = getattr(exc, "filename", None)
+    name = Path(str(filename)).name if filename else ""
+    if isinstance(exc, FileNotFoundError):
+        return missing_original_message((name,)) if name else "原本が見つかりません："
+    text = str(exc)
+    if name and (isinstance(exc, OSError) or "/" in text or "\\" in text or "Errno" in text):
+        return unreadable_original_message((name,))
+    if "/" in text or "\\" in text or "Errno" in text:
+        return "原本を開けません。"
+    detail = text.strip().replace("\n", " ")
     if len(detail) > 180:
         detail = detail[:180]
     return detail or "保存できませんでした。"

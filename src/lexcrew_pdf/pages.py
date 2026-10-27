@@ -22,12 +22,18 @@ def arrange_pages(
     rows: list[dict],
     *,
     max_group: int,
+    files_per_slot: list[int] | None = None,
 ) -> dict[int, list[PageRef]]:
-    """保存した並びを、今の原本に合わせる。新しいページは本体の末尾に足す。"""
+    """保存した並びを、今の原本に合わせる。
+
+    行が一つでもある原本の新しいページは、本体の末尾に足す。
+    行が無い原本は、その原本の枝番グループに入れる。
+    """
     buckets: dict[int, list[PageRef]] = {group: [] for group in range(max_group + 1)}
     natural_set = set(natural)
     seen: set[PageRef] = set()
     ordered = sorted(rows, key=lambda row: int(row.get("position") or 0))
+    sources_with_rows = {int(row["source_index"]) for row in rows}
     for row in ordered:
         key = (int(row["source_index"]), int(row["page_index"]), int(row["part"]))
         group = int(row["group_index"])
@@ -36,8 +42,14 @@ def arrange_pages(
         seen.add(key)
         buckets[group].append(key)
     for key in natural:
-        if key not in seen:
-            buckets[GROUP_PRIMARY].append(key)
+        if key in seen:
+            continue
+        group = GROUP_PRIMARY
+        if files_per_slot is not None and key[0] not in sources_with_rows:
+            slot_group = _slot_for_source(key[0], files_per_slot) + 1
+            if slot_group in buckets:
+                group = slot_group
+        buckets[group].append(key)
     return buckets
 
 
@@ -45,13 +57,22 @@ def resolve_buckets(
     natural: list[PageRef],
     rows: list[dict],
     files_per_slot: list[int],
+    *,
+    honor_exclusions: bool = False,
 ) -> dict[int, list[PageRef]]:
-    """本体が空の指定は無視して、原本の並びに戻す。"""
+    """本体が空の指定は無視して、原本の並びに戻す。
+
+    原本が消えて残ったのが除いたページだけのときは、honor_exclusions で
+    そのページを出さない。全ページを除いただけの指定は、これまで通り戻す。
+    """
     max_group = max(1, len(files_per_slot))
     if not rows:
         return natural_buckets(natural, files_per_slot)
-    buckets = arrange_pages(natural, rows, max_group=max_group)
+    buckets = arrange_pages(natural, rows, max_group=max_group, files_per_slot=files_per_slot)
     if not buckets[GROUP_PRIMARY]:
+        later = any(buckets.get(group) for group in range(GROUP_PRIMARY + 1, max_group + 1))
+        if later or (honor_exclusions and buckets.get(GROUP_EXCLUDED)):
+            return buckets
         return natural_buckets(natural, files_per_slot)
     return buckets
 

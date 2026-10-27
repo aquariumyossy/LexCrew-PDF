@@ -1,4 +1,4 @@
-"""カードの状態。起動時の表示は配置だけを使い、PDF は開かない。"""
+"""カードの状態。起動時の一覧は、原本を全部メモリへ読まずに開けるかだけ見る。"""
 from __future__ import annotations
 
 import base64
@@ -26,21 +26,28 @@ from .layout import (
     Card,
     Layout,
     Mask,
+    OriginalState,
     PageRow,
     Skew,
     Slot,
     Trim,
     adopt_output_directory,
+    check_original,
     default_layout,
+    is_missing_original_message,
     layout_path,
     load_layout,
+    missing_original_message,
     require_source_file,
+    stored_file_name,
+    unreadable_original_message,
     save_layout,
     store_path,
     with_next_series,
     with_series,
 )
-from .pages import assignment_is_natural, shift_source_indexes
+from .originals import adopt_originals, copy_original, remember_case, release_copies
+from .pages import GROUP_EXCLUDED, assignment_is_natural, shift_source_indexes
 
 
 class _GUID(ctypes.Structure):
@@ -84,10 +91,34 @@ class OpenEditor:
     slot_index: int
 
 
+_LAYOUT_RETRY = "配置を読み直しました。もう一度操作してください。"
+
+
+def _allow_unread(method):
+    method._allows_unread = True
+    return method
+
+
+def _allow_stale(method):
+    method._allows_stale = True
+    return method
+
+
 def _locked(method):
     def call(self, *args, **kwargs):
         with self._lock:
-            return method(self, *args, **kwargs)
+            self._lock_depth += 1
+            try:
+                self._prepare_layout()
+                if self._layout_unread and not getattr(method, "_allows_unread", False):
+                    raise OSError(13, "配置ファイルを読めません。")
+                if self._view_is_stale and not getattr(method, "_allows_stale", False):
+                    # ネストした view は、まだ画面に出していない印を消さない。
+                    refreshed = self.view()
+                    return {**refreshed, "ok": False, "message": _LAYOUT_RETRY}
+                return method(self, *args, **kwargs)
+            finally:
+                self._lock_depth -= 1
 
     return call
 
@@ -127,13 +158,21 @@ class Session:
         self.folder: Path | None = None
         self.notice = ""
         self.card_errors: dict[int, str] = {}
+        self._blocked_originals: dict[int, tuple[str, ...]] = {}
+        self._layout_unread = False
+        self._view_is_stale = False
+        self._lock_depth = 0
         self.open_editor: OpenEditor | None = None
         self._lock = threading.RLock()
         if folder is not None:
             self._use_output_folder(Path(folder))
 
     @_locked
+    @_allow_unread
+    @_allow_stale
     def view(self) -> dict:
+        if self._lock_depth == 1:
+            self._view_is_stale = False
         output = self.folder / OUTPUT_DIR_NAME if self.folder else None
         editing = self.open_editor
         book = self._filename_book()
@@ -172,6 +211,7 @@ class Session:
         return self.view()
 
     @_locked
+    @_allow_stale
     def editor_identity(self) -> dict | None:
         editing = self.open_editor
         if editing is None:
@@ -179,6 +219,7 @@ class Session:
         return {"number": editing.number, "slot": editing.slot_index}
 
     @_locked
+    @_allow_stale
     def edit_context(self) -> dict:
         editing = self.open_editor
         if editing is None:
@@ -215,6 +256,7 @@ class Session:
         }
 
     @_locked
+    @_allow_stale
     def ensure_editable(self, number: int) -> None:
         self._guard(int(number))
 
@@ -224,6 +266,7 @@ class Session:
             raise ValueError("このカードは編集中です。")
 
     def _use_output_folder(self, folder: Path) -> None:
+        self._layout_unread = False
         if not directory_available(folder):
             self.notice = directory_message()
             return
@@ -233,18 +276,36 @@ class Session:
         except OSError:
             self.notice = f"保存先を {OUTPUT_DIR_NAME} に移せません。"
             return
-        if not layout_path(folder).is_file():
+        try:
+            has_layout = layout_path(folder).is_file()
+        except OSError:
+            self.notice = "配置ファイルを読めません。"
+            self._layout_unread = True
+            return
+        if not has_layout:
+            remember_case(folder)
             return
         try:
             loaded = load_layout(folder)
         except (OSError, ValueError):
             self.notice = "配置ファイルを読めません。"
+            self._layout_unread = True
             return
         if loaded is None:
             self.notice = "配置ファイルを読めません。"
+            self._layout_unread = True
             return
-        self.layout = loaded
+        adopted = adopt_originals(folder, loaded)
+        self.layout = adopted
         self.card_errors = {}
+        self._blocked_originals = {}
+        if adopted != loaded:
+            try:
+                self._persist()
+            except OSError:
+                # 出力先が書けなくても起動は続ける。今作った複製は消さない。
+                pass
+        remember_case(folder)
 
     @_locked
     def add_card(self) -> dict:
@@ -261,13 +322,29 @@ class Session:
         card = self._card(number)
         if slot_index < 0 or slot_index >= len(card.slots):
             raise ValueError("証拠の番号が不正です。")
+        removed = tuple(item for slot in card.slots for item in slot.files) if len(card.slots) == 1 else card.slots[slot_index].files
+        snapshot = self.layout
+        errors = dict(self.card_errors)
+        blocked = dict(self._blocked_originals)
+        editor = self.open_editor
         if len(card.slots) == 1:
             self._remove_evidence(number)
             editing = self.open_editor
             if editing is not None and editing.number > number:
                 self.open_editor = OpenEditor(editing.number - 1, editing.slot_index)
-            return self.view()
-        self._put(_without_slot(card, slot_index))
+        else:
+            self._put(_without_slot(card, slot_index))
+        failed = self._release(removed)
+        if failed:
+            self.layout = snapshot
+            self.card_errors = errors
+            self._blocked_originals = blocked
+            self.open_editor = editor
+            try:
+                self._persist()
+            except OSError:
+                pass
+            raise ValueError("原本を消せません。" + "、".join(failed))
         return self.view()
 
     @_locked
@@ -289,6 +366,7 @@ class Session:
         src = next(index for index, item in enumerate(cards) if item.number == number)
         marks = [item.number for item in cards]
         errors = {item.number: self.card_errors.get(item.number, "") for item in cards}
+        blocked = {item.number: self._blocked_originals.get(item.number, ()) for item in cards}
         if len(card.slots) == 1:
             moved = cards.pop(src)
             moved_mark = marks.pop(src)
@@ -308,6 +386,11 @@ class Session:
             index: errors[mark]
             for index, mark in enumerate(marks, start=1)
             if mark is not None and errors.get(mark)
+        }
+        self._blocked_originals = {
+            index: blocked[mark]
+            for index, mark in enumerate(marks, start=1)
+            if mark is not None and blocked.get(mark)
         }
         if editing is not None:
             self.open_editor = OpenEditor(marks.index(editing.number) + 1, editing.slot_index)
@@ -382,10 +465,12 @@ class Session:
     @_locked
     def clear(self) -> dict:
         """作業中の配置を起動直後に戻す。生成済みPDFと出力フォルダは残す。"""
+        removed = self._all_files()
         self.open_editor = None
         self.card_errors = {}
         self.layout = default_layout()
         self._persist()
+        self._release(removed)
         return self.view()
 
     @_locked
@@ -468,6 +553,12 @@ class Session:
     def add_file(self, number: int, slot_index: int, file_path: str) -> dict:
         self._guard(int(number))
         card = self._card(number)
+        slot = card.slots[int(slot_index)]
+        # 無い原本だけで空に見える枝番は、隠れたパスを差し替える。他の原本のページ指定は残す。
+        if slot.files and all(
+            self._original_state(stored) is OriginalState.MISSING for stored in slot.files
+        ):
+            return self._replace_missing_slot(number, slot_index, file_path)
         stored = self._store(file_path)
         slots = list(card.slots)
         slot = slots[slot_index]
@@ -480,20 +571,99 @@ class Session:
         self._put(_replace(card, slots=tuple(slots), pages=pages, masks=masks, trims=trims, skews=skews))
         return self.view()
 
+    def _replace_missing_slot(self, number: int, slot_index: int, file_path: str) -> dict:
+        card = self._card(number)
+        slot = card.slots[int(slot_index)]
+        old = slot.files
+        stored = self._store(file_path)
+        slots = list(card.slots)
+        start = sum(len(item.files) for item in slots[:slot_index])
+        slots[slot_index] = replace(slot, files=(stored,))
+        self._put(_replace(
+            card,
+            slots=tuple(slots),
+            pages=_drop_pages(card.pages, start, len(old), 1),
+            masks=_drop_sources(card.masks, start, len(old), 1),
+            trims=_drop_sources(card.trims, start, len(old), 1),
+            skews=_drop_sources(card.skews, start, len(old), 1),
+        ))
+        self._release(old)
+        return self.view()
+
     @_locked
     def replace_file(self, number: int, slot_index: int, file_index: int, file_path: str) -> dict:
         self._guard(int(number))
         card = self._card(number)
         stored = self._store(file_path)
         slots = list(card.slots)
+        old = (slots[slot_index].files[file_index],)
         files = list(slots[slot_index].files)
         files[file_index] = stored
         flat = sum(len(item.files) for item in slots[:slot_index]) + file_index
+        owned = [row for row in (card.pages or ()) if row.source == flat]
+        anchor = _replacement_place(
+            owned,
+            slot_index,
+            card.pages,
+            flat,
+            [len(item.files) for item in slots],
+        )
         slots[slot_index] = replace(slots[slot_index], files=tuple(files))
         masks = _drop_sources(card.masks, flat, 1, 1)
         trims = _drop_sources(card.trims, flat, 1, 1)
         skews = _drop_sources(card.skews, flat, 1, 1)
-        self._put(_replace(card, slots=tuple(slots), pages=None, masks=masks, trims=trims, skews=skews))
+        pages = _drop_pages(card.pages, flat, 1, 1)
+        if anchor is not None and pages is not None:
+            position, group = anchor
+            pages = _pages_at_replaced_position(
+                pages,
+                flat,
+                _natural_parts(self.folder, stored, card.split_a4, slots[slot_index].rotation),
+                position,
+                group,
+            )
+        self._put(_replace(
+            card,
+            slots=tuple(slots),
+            pages=pages,
+            masks=masks,
+            trims=trims,
+            skews=skews,
+        ))
+        self._release(old)
+        self._current_card_error(self._card(number))
+        return self.view()
+
+    @_locked
+    def remove_file(self, number: int, slot_index: int, file_index: int) -> dict:
+        """無い原本の行だけ外す。配置を変える前に、複製を消せるかを見る。"""
+        self._guard(int(number))
+        card = self._card(number)
+        _check_slot(card, slot_index)
+        slot = card.slots[slot_index]
+        file_index = int(file_index)
+        if file_index < 0 or file_index >= len(slot.files):
+            raise ValueError("原本の番号が不正です。")
+        if not self._can_remove_original(slot.files[file_index]):
+            raise ValueError("この原本は外せません。")
+        old = (slot.files[file_index],)
+        failed = release_copies(old, live=_live_without(self._all_files(), old))
+        if failed:
+            raise ValueError("原本を消せません。" + "、".join(failed))
+        flat = sum(len(item.files) for item in card.slots[:slot_index]) + file_index
+        slots = list(card.slots)
+        files = list(slots[slot_index].files)
+        del files[file_index]
+        slots[slot_index] = replace(slots[slot_index], files=tuple(files))
+        self._put(_replace(
+            card,
+            slots=tuple(slots),
+            pages=_drop_pages(card.pages, flat, 1, 0),
+            masks=_drop_sources(card.masks, flat, 1, 0),
+            trims=_drop_sources(card.trims, flat, 1, 0),
+            skews=_drop_sources(card.skews, flat, 1, 0),
+        ))
+        self._current_card_error(self._card(number))
         return self.view()
 
     @_locked
@@ -502,15 +672,31 @@ class Session:
         if not paths:
             return self.view()
         card = self._card(number)
-        stored = tuple(self._store(path) for path in paths)
+        copied: list[str] = []
+        try:
+            for path in paths:
+                copied.append(self._store(path))
+        except Exception:
+            self._release(copied)
+            raise
         slots = list(card.slots)
+        old = slots[slot_index].files
         start = sum(len(item.files) for item in slots[:slot_index])
-        old_count = len(slots[slot_index].files)
-        slots[slot_index] = replace(slots[slot_index], files=stored)
-        masks = _drop_sources(card.masks, start, old_count, len(stored))
-        trims = _drop_sources(card.trims, start, old_count, len(stored))
-        skews = _drop_sources(card.skews, start, old_count, len(stored))
-        self._put(_replace(card, slots=tuple(slots), pages=None, masks=masks, trims=trims, skews=skews))
+        old_count = len(old)
+        slots[slot_index] = replace(slots[slot_index], files=tuple(copied))
+        masks = _drop_sources(card.masks, start, old_count, len(copied))
+        trims = _drop_sources(card.trims, start, old_count, len(copied))
+        skews = _drop_sources(card.skews, start, old_count, len(copied))
+        self._put(_replace(
+            card,
+            slots=tuple(slots),
+            pages=_drop_pages(card.pages, start, old_count, len(copied)),
+            masks=masks,
+            trims=trims,
+            skews=skews,
+        ))
+        self._release(old)
+        self._current_card_error(self._card(number))
         return self.view()
 
     @_locked
@@ -536,24 +722,38 @@ class Session:
         """枝番カードの編集は、その枝番の出すページと、その原本の除くページだけ。"""
         card = self._card(number)
         _check_slot(card, slot_index)
-        natural, files_per_slot = self._natural(card)
-        buckets = _resolved(card, natural, files_per_slot)
-        group = slot_index + 1
-        start, end = _slot_source_span(files_per_slot, slot_index)
-        shown = list(buckets.get(group) or [])
-        hidden = [ref for ref in buckets.get(0) or [] if start <= ref[0] < end]
-        tilt = card.slots[slot_index].rotation
-        boxes = _image_boxes(self._paths(card), shown + hidden, tilt)
-        return {
-            "number": number,
-            "slot": slot_index,
-            "masks": _project_masks(
+        problem = _editor_problem_message(self.folder, card)
+        if problem is not None:
+            raise ValueError(problem)
+        try:
+            natural, files_per_slot = self._natural(card)
+            buckets = _resolved(card, natural, files_per_slot)
+            group = slot_index + 1
+            start, end = _slot_source_span(files_per_slot, slot_index)
+            shown = list(buckets.get(group) or [])
+            hidden = [ref for ref in buckets.get(0) or [] if start <= ref[0] < end]
+            tilt = card.slots[slot_index].rotation
+            boxes = _image_boxes(self._paths(card), shown + hidden, tilt)
+            masks = _project_masks(
                 self._paths(card),
                 card.masks,
                 shown,
                 tilt,
                 card.skews,
-            ),
+            )
+        except ValueError as exc:
+            text = str(exc)
+            if text.startswith("原本が見つかりません：") or text.startswith("原本を開けません。"):
+                raise
+            if "/" not in text and "\\" not in text and "Errno" not in text and not text.isascii():
+                raise
+            raise ValueError(_editor_problem_message(self.folder, card) or "原本を開けません。") from None
+        except Exception:
+            raise ValueError(_editor_problem_message(self.folder, card) or "原本を開けません。") from None
+        return {
+            "number": number,
+            "slot": slot_index,
+            "masks": masks,
             "columns": [
                 {
                     "group": group,
@@ -828,15 +1028,46 @@ class Session:
             masks = card.masks
             trims = card.trims
             skews = card.skews
+            missing_names = []
+            blocked_names = []
+            stored_files = tuple(item for slot in card.slots for item in slot.files)
+            folder = self.folder
+            for stored in stored_files:
+                state = self._original_state(stored)
+                if state is OriginalState.MISSING:
+                    missing_names.append(stored_file_name(stored))
+                elif state is OriginalState.UNREADABLE:
+                    blocked_names.append(stored_file_name(stored))
+        if missing_names or blocked_names:
+            parts = []
+            if missing_names:
+                parts.append(missing_original_message(tuple(missing_names)))
+            if blocked_names:
+                parts.append(unreadable_original_message(tuple(blocked_names)))
+            return {"ok": False, "message": " ".join(parts), "slots": []}
+        if folder is not None and stored_files:
+            from .plan import _unusable_stored
+
+            bad = _unusable_stored(folder, stored_files, fresh=True)
+            if bad:
+                return {
+                    "ok": False,
+                    "message": missing_original_message(_unique_stored_names(bad)),
+                    "slots": [],
+                }
         trim_map = trim_lookup(trims)
         skew_map = skew_lookup(skews)
         empty_slots = [{"index": index, "pageCount": 0, "thumb": ""} for index in range(len(counts))]
         if not paths:
             return {"number": ordinal, "pageCount": 0, "splittable": False, "thumb": "", "slots": empty_slots}
         tilts = [rotation for rotation, count in zip(rotations, counts) for _file in range(count)]
-        _raw, _expanded, splittable, natural, spreads = inspect_source_pages(
-            paths, split=split, tilts=tilts,
-        )
+        try:
+            _raw, _expanded, splittable, natural, spreads = inspect_source_pages(
+                paths, split=split, tilts=tilts,
+            )
+        except OSError:
+            names = tuple(stored_file_name(path) for path in paths)
+            return {"ok": False, "message": unreadable_original_message(names), "slots": []}
         buckets = resolve_buckets(list(natural), page_rows, counts)
         page_counts = [len(list(buckets.get(index + 1) or [])) for index in range(len(counts))]
         slots = []
@@ -995,46 +1226,68 @@ class Session:
     @_locked
     def preview_generate(self) -> dict:
         """書く前に、置き換え・削除・別名の一覧を返す。ファイルは変えない。"""
-        from .plan import jobs_from_layout
+        from .plan import generation_blockers, jobs_from_layout
         from .write import pending_writes
 
         if self.folder is None:
             return {"replace": [], "delete": [], "keep": []}
+        if generation_blockers(self.layout, self.folder):
+            return {"replace": [], "delete": [], "keep": []}
         built = jobs_from_layout(self.layout, self.folder)
+        if built.errors:
+            return {"replace": [], "delete": [], "keep": []}
         names = [job.filename for job in built.jobs]
-        return pending_writes(self.folder, names, self.layout.last_written, built.kept)
+        pending = pending_writes(self.folder, names, self.layout.last_written, built.kept)
+        pending["writing"] = names
+        return pending
 
     def generate(self) -> dict:
-        from .plan import jobs_from_layout
+        from .plan import generation_blockers, jobs_from_layout
         from .stamp import StampFontMissing
         from .write import write_jobs
 
         with self._lock:
             if self.folder is None:
                 return {"ok": False, **self.view(), "message": directory_message()}
+            self._prepare_layout()
+            if self._layout_unread:
+                self.notice = "配置ファイルを読めません。"
+                return {"ok": False, **self.view(), "message": self.notice}
+            if self._view_is_stale:
+                refreshed = self.view()
+                return {"ok": False, "written": [], **refreshed, "message": _LAYOUT_RETRY}
             folder = self.folder
             layout = self.layout
-            last_written = layout.last_written
-            grayscale = layout.grayscale
-            style = layout.stamp
-            page_numbers = layout.page_numbers
-        built = jobs_from_layout(layout, folder)
-        try:
-            result = write_jobs(
-                folder,
-                built.jobs,
-                last_written=last_written,
-                preserve=built.preserve,
-                grayscale=grayscale,
-                style=style,
-                page_numbers=page_numbers,
-                stamp_enabled=layout.stamp_enabled,
-                fit_stamp=not template_has_number(layout.label_template),
-            )
-        except StampFontMissing as exc:
-            return {"ok": False, **self.view(), "message": str(exc)}
-        with self._lock:
-            self.card_errors = {row["number"]: row["message"] for row in built.errors}
+            blocked = generation_blockers(layout, folder)
+            if blocked:
+                return self._generation_stopped(folder, blocked)
+            built = jobs_from_layout(layout, folder)
+            if built.errors:
+                again = generation_blockers(layout, folder)
+                if again:
+                    return self._generation_stopped(folder, again)
+                return self._generation_plan_stopped(built)
+            try:
+                result = write_jobs(
+                    folder,
+                    built.jobs,
+                    last_written=layout.last_written,
+                    preserve=built.preserve,
+                    grayscale=layout.grayscale,
+                    style=layout.stamp,
+                    page_numbers=layout.page_numbers,
+                    stamp_enabled=layout.stamp_enabled,
+                    fit_stamp=not template_has_number(layout.label_template),
+                )
+            except StampFontMissing as exc:
+                return {"ok": False, **self.view(), "message": str(exc)}
+            # 原本が無い案内はカード番号に紐づけない。表示は今のスロットから出す。
+            self._blocked_originals = {}
+            self.card_errors = {
+                row["number"]: row["message"]
+                for row in built.errors
+                if not is_missing_original_message(row["message"])
+            }
             for row in result["errors"]:
                 number = _number_for_filename(built.jobs, row["filename"])
                 if number is not None:
@@ -1055,12 +1308,18 @@ class Session:
                     card,
                     self.layout.merge_branches,
                     self._shown(card.number),
+                    skip=self._merge_skip(card),
                 )
                 if structural.warning:
                     continue
                 self.card_errors[row["number"]] = row["message"]
+            stale = [
+                row["message"]
+                for row in result["errors"]
+                if str(row.get("message", "")).startswith("削除できませんでした。")
+            ]
             written = len(result["written"])
-            failed = len(result["errors"]) + len(built.errors)
+            failed = len(result["errors"]) - len(stale) + len(built.errors)
             if written and failed:
                 message = f"{written}件を {folder / OUTPUT_DIR_NAME} に保存しました。{failed}件は保存できませんでした。"
             elif failed:
@@ -1073,32 +1332,121 @@ class Session:
                 message += " 置き換えたファイル: " + "、".join(result["replaced"]) + "。"
             if result.get("deleted"):
                 message += " 削除したファイル: " + "、".join(result["deleted"]) + "。"
+            if stale:
+                message += " " + " ".join(stale)
             if built.warnings:
                 message = f"{message} " + " ".join(row["message"] for row in built.warnings)
             return {
-                "ok": failed == 0,
+                "ok": failed == 0 and not stale,
                 "written": result["written"],
                 "errors": result["errors"],
                 **self.view(),
             "message": message,
         }
 
+    def _generation_stopped(self, folder: Path, blocked) -> dict:
+        """原本が使えない。証拠 PDF は書かない。ロックを持ったまま呼ぶ。"""
+        for number, names in blocked:
+            card = next((item for item in self.layout.cards if item.number == number), None)
+            if card is None:
+                continue
+            known = {
+                stored_file_name(stored)
+                for stored in _flat_card_files(card)
+                if check_original(folder, stored) is not OriginalState.PRESENT
+            }
+            extra = tuple(name for name in names if name not in known)
+            remembered = tuple(
+                stored
+                for stored in _flat_card_files(card)
+                if stored_file_name(stored) in extra
+                and check_original(folder, stored) is OriginalState.PRESENT
+                and self._stored_still_blocked(stored)
+            )
+            if remembered:
+                self._blocked_originals[number] = remembered
+                self.card_errors[number] = missing_original_message(_unique_stored_names(remembered))
+        view = self.view()
+        listed: list[str] = []
+        for _number, names in blocked:
+            listed.extend(names)
+        return {
+            "ok": False,
+            "written": [],
+            "errors": [
+                {"number": number, "message": missing_original_message(names)}
+                for number, names in blocked
+            ],
+            **view,
+            "message": missing_original_message(tuple(listed)),
+        }
+
+    def _generation_plan_stopped(self, built) -> dict:
+        """計画に失敗した。証拠 PDF は書かない。"""
+        self._blocked_originals = {}
+        messages = []
+        for row in built.errors:
+            message = _filename_only(row["message"])
+            messages.append(message)
+            if not is_missing_original_message(message):
+                self.card_errors[row["number"]] = message
+        view = self.view()
+        return {
+            "ok": False,
+            "written": [],
+            "errors": [
+                {"number": row["number"], "message": message}
+                for row, message in zip(built.errors, messages)
+            ],
+            **view,
+            "message": " ".join(messages),
+        }
+
     def _card_view(self, card: Card, book: FilenameBook) -> dict:
-        from .plan import file_merge_choice
+        from .plan import MergeChoice, file_merge_choice
 
         slot_count = len(card.slots)
         shown = self._shown(card.number)
-        choice = file_merge_choice(
-            self.layout.label_template,
-            card,
-            self.layout.merge_branches,
-            shown,
-            book=book,
+        states, skip = self._presence(card)
+        from .plan import _unusable_stored
+
+        stat_blocked = any(
+            state is OriginalState.MISSING or state is OriginalState.UNREADABLE
+            for slot_states in states
+            for state in slot_states
         )
+        bad_stored = _unusable_stored(self.folder, _flat_card_files(card)) if self.folder is not None else ()
+        unusable = stat_blocked or bool(bad_stored)
+        if unusable:
+            choice = MergeChoice()
+        else:
+            choice = file_merge_choice(
+                self.layout.label_template,
+                card,
+                self.layout.merge_branches,
+                shown,
+                book=book,
+                skip=skip,
+            )
         slots = []
         for index, slot in enumerate(card.slots):
             included = index in choice.included
             filename = choice.filename if choice.filename and (index == 0 or included) else self._slot_filename(card, index, book)
+            present = any(state is not OriginalState.MISSING for state in states[index])
+            visible = []
+            for file_index, (stored, state) in enumerate(zip(slot.files, states[index])):
+                if state is OriginalState.MISSING and not present:
+                    continue
+                row = {
+                    "index": file_index,
+                    "name": stored_file_name(stored),
+                    "stored": stored_file_name(stored),
+                }
+                if state is OriginalState.MISSING:
+                    row["missing"] = True
+                elif stored in bad_stored:
+                    row["unusable"] = True
+                visible.append(row)
             slots.append({
                 "index": index,
                 "label": display_label(self.layout.label_template, shown, index, slot_count),
@@ -1107,7 +1455,7 @@ class Session:
                 "title": slot.title,
                 "rotation": slot.rotation,
                 "outputNote": f"→ {choice.token} に含めて出力" if included else "",
-                "files": [{"index": file_index, "name": Path(stored).name, "stored": stored} for file_index, stored in enumerate(slot.files)],
+                "files": visible,
             })
         return {
             "number": card.number,
@@ -1116,10 +1464,10 @@ class Session:
             "rotation": card.slots[0].rotation,
             "splitA4": card.split_a4,
             "slots": slots,
-            "hasFile": any(slot.files for slot in card.slots),
+            "hasFile": any(slot["files"] for slot in slots),
             "mergedFilename": choice.filename,
             "mergeWarning": choice.warning,
-            "message": self.card_errors.get(card.number, ""),
+            "message": self._card_message(card, states),
         }
 
     def _slot_filename(self, card: Card, slot_index: int, book: FilenameBook) -> str:
@@ -1136,7 +1484,11 @@ class Session:
 
         blocked = set()
         if self.folder is not None:
-            blocked = foreign_output_names(self.folder, self.layout.last_written)
+            try:
+                blocked = foreign_output_names(self.folder, self.layout.last_written)
+            except OSError:
+                if not self.notice:
+                    self.notice = "配置ファイルを読めません。"
         return FilenameBook(self.layout.label_template, self.layout.stamp_enabled, blocked=blocked)
 
     def _title_from_field(self, card: Card, slot_index: int, text: str) -> str:
@@ -1156,6 +1508,7 @@ class Session:
                 self.layout.merge_branches,
                 shown,
                 book=book,
+                skip=self._merge_skip(card),
             )
             for index, _slot in enumerate(card.slots):
                 included = index in choice.included
@@ -1174,35 +1527,190 @@ class Session:
         raise ValueError("証拠の番号が不正です。")
 
     def _remove_evidence(self, number: int) -> None:
+        previous_layout = self.layout
+        previous_errors = self.card_errors
+        previous_blocked = self._blocked_originals
         kept = [card for card in self.layout.cards if card.number != number]
         renumbered = tuple(_replace(card, number=index) for index, card in enumerate(kept, start=1))
         shifted: dict[int, str] = {}
+        shifted_blocked: dict[int, tuple[str, ...]] = {}
         for new_number, card in enumerate(kept, start=1):
             message = self.card_errors.get(card.number)
             if message:
                 shifted[new_number] = message
+            remembered = self._blocked_originals.get(card.number)
+            if remembered:
+                shifted_blocked[new_number] = remembered
         self.card_errors = shifted
+        self._blocked_originals = shifted_blocked
         self.layout = self._with_cards(renumbered)
-        self._persist()
+        try:
+            self._persist()
+        except OSError:
+            self.layout = previous_layout
+            self.card_errors = previous_errors
+            self._blocked_originals = previous_blocked
+            raise
 
     def _put(self, card: Card) -> None:
+        previous = self.layout
         cards = tuple(card if item.number == card.number else item for item in self.layout.cards)
         self.layout = self._with_cards(cards)
-        self._persist()
+        try:
+            self._persist()
+        except OSError:
+            self.layout = previous
+            raise
 
     def _with_cards(self, cards: tuple[Card, ...]) -> Layout:
         return replace(self.layout, cards=cards)
 
+    def _can_remove_original(self, stored: str) -> bool:
+        """無い原本と、開いてもページを読めない原本だけ外せる。"""
+        state = self._original_state(stored)
+        if state is not OriginalState.PRESENT:
+            return True
+        if self.folder is None:
+            return False
+        from .layout import resolve_stored_path
+        from .stamp import source_is_unusable
+
+        try:
+            path = resolve_stored_path(self.folder, stored)
+        except ValueError:
+            return True
+        return source_is_unusable(str(path), fresh=True)
+
+    def _current_card_error(self, card: Card) -> str:
+        """直した原本の『原本が見つかりません』は、もう出さない。ファイル名は分割しない。"""
+        message = self.card_errors.get(card.number, "")
+        if not is_missing_original_message(message):
+            return message
+        if card.number not in self._blocked_originals:
+            return message
+        live = set(_flat_card_files(card))
+        kept = tuple(
+            stored
+            for stored in self._blocked_originals[card.number]
+            if stored in live and self._stored_still_blocked(stored)
+        )
+        if kept:
+            self._blocked_originals[card.number] = kept
+            updated = missing_original_message(_unique_stored_names(kept))
+            self.card_errors[card.number] = updated
+            return updated
+        self._blocked_originals.pop(card.number, None)
+        self.card_errors.pop(card.number, None)
+        return ""
+
+    def _stored_still_blocked(self, stored: str) -> bool:
+        if self.folder is None:
+            return True
+        if check_original(self.folder, stored) is not OriginalState.PRESENT:
+            return True
+        from .layout import resolve_stored_path
+        from .stamp import source_is_unusable
+
+        try:
+            path = resolve_stored_path(self.folder, stored)
+        except ValueError:
+            return True
+        return source_is_unusable(str(path), fresh=True)
+
+    def _original_state(self, stored: str) -> OriginalState:
+        if self.folder is None:
+            return OriginalState.PRESENT
+        return check_original(self.folder, stored)
+
+    def _presence(self, card: Card) -> tuple[list[list[OriginalState]], frozenset[int]]:
+        states: list[list[OriginalState]] = []
+        skip: list[int] = []
+        for index, slot in enumerate(card.slots):
+            slot_states = [self._original_state(stored) for stored in slot.files]
+            states.append(slot_states)
+            if slot.files and all(state is OriginalState.MISSING for state in slot_states):
+                skip.append(index)
+        return states, frozenset(skip)
+
+    def _merge_skip(self, card: Card) -> frozenset[int]:
+        return self._presence(card)[1]
+
+    def _card_message(self, card: Card, states: list[list[OriginalState]]) -> str:
+        missing: list[str] = []
+        blocked: list[str] = []
+        for slot, slot_states in zip(card.slots, states):
+            for stored, state in zip(slot.files, slot_states):
+                if state is OriginalState.MISSING:
+                    missing.append(stored_file_name(stored))
+                elif state is OriginalState.UNREADABLE:
+                    blocked.append(stored_file_name(stored))
+        parts: list[str] = []
+        if missing:
+            parts.append(missing_original_message(tuple(missing)))
+        if blocked:
+            parts.append(unreadable_original_message(tuple(blocked)))
+        other = self.card_errors.get(card.number, "")
+        if not parts:
+            return other
+        if other and not is_missing_original_message(other) and other not in parts:
+            parts.append(other)
+        return " ".join(parts)
+
+    def _prepare_layout(self) -> None:
+        """読めなかった配置は、次の操作の前に読み直す。読めない間は上書きしない。"""
+        if not self._layout_unread or self.folder is None:
+            return
+        try:
+            has_layout = layout_path(self.folder).is_file()
+        except OSError:
+            return
+        if not has_layout:
+            self._layout_unread = False
+            if self.notice == "配置ファイルを読めません。":
+                self.notice = ""
+            return
+        try:
+            loaded = load_layout(self.folder)
+        except (OSError, ValueError):
+            return
+        if loaded is None:
+            return
+        adopted = adopt_originals(self.folder, loaded)
+        self.layout = adopted
+        self.card_errors = {}
+        self._blocked_originals = {}
+        self._layout_unread = False
+        self._view_is_stale = True
+        if self.notice == "配置ファイルを読めません。":
+            self.notice = ""
+        if adopted != loaded:
+            try:
+                save_layout(self.folder, adopted)
+            except OSError:
+                pass
+
     def _persist(self) -> None:
-        if self.folder is not None:
-            save_layout(self.folder, self.layout)
+        if self.folder is None:
+            return
+        if self._layout_unread:
+            raise OSError(13, "配置ファイルを読めません。")
+        save_layout(self.folder, self.layout)
+        if self.notice == "配置ファイルを読めません。":
+            self.notice = ""
+
+    def _all_files(self) -> tuple[str, ...]:
+        return tuple(item for card in self.layout.cards for slot in card.slots for item in slot.files)
+
+    def _release(self, stored_paths) -> tuple[str, ...]:
+        return release_copies(stored_paths, live=self._all_files())
 
     def _store(self, file_path: str) -> str:
         path = Path(file_path)
         require_source_file(path)
+        copied = copy_original(path)
         if self.folder is None:
-            return str(path.resolve())
-        return store_path(self.folder, path)
+            return str(copied)
+        return store_path(self.folder, copied)
 
     def _paths(self, card: Card) -> tuple[str, ...]:
         folder = self.folder or Path(".")
@@ -1220,6 +1728,140 @@ class Session:
             paths, split=card.split_a4, tilts=tilts,
         )
         return list(natural), [len(slot.files) for slot in card.slots]
+
+
+def _flat_card_files(card: Card) -> tuple[str, ...]:
+    return tuple(stored for slot in card.slots for stored in slot.files)
+
+
+def _live_without(paths, removed) -> list[str]:
+    pending = list(removed)
+    live = []
+    for item in paths:
+        if item in pending:
+            pending.remove(item)
+            continue
+        live.append(item)
+    return live
+
+
+def _natural_parts(folder: Path | None, stored: str, split: bool, tilt: int) -> tuple[tuple[int, int, int], ...]:
+    from .layout import resolve_stored_path
+    from .stamp import inspect_source_pages
+
+    if folder is None:
+        return ()
+    try:
+        path = resolve_stored_path(folder, stored)
+        _raw, _expanded, _splittable, natural, _spreads = inspect_source_pages(
+            [str(path)], split=split, tilts=[tilt],
+        )
+    except Exception:
+        return ()
+    return tuple(natural)
+
+
+def _replacement_place(owned, slot_index: int, pages, source: int, files_per_slot) -> tuple[int, int] | None:
+    """差替えた原本を出す位置。除いた行の位置は使わない。
+
+    出す行が残っていれば、その最初の位置へ戻す。全部除いてあるときは、
+    同じ枝番の出す原本の並びで、差し替えたファイルがあった場所へ入れる。
+    別の枝番が位置 0 でも、そこへは動かさない。
+    """
+    if not owned:
+        return None
+    included = [row for row in owned if row.group != GROUP_EXCLUDED]
+    if included:
+        earliest = min(included, key=lambda row: row.position)
+        return earliest.position, earliest.group
+    group = slot_index + 1
+    start, end = _slot_source_span(files_per_slot, slot_index)
+    others = [
+        row for row in (pages or ())
+        if start <= row.source < end and row.source != source and row.group != GROUP_EXCLUDED
+    ]
+    later = [row for row in others if row.source > source]
+    if later:
+        return min(row.position for row in later), group
+    earlier = [row for row in others if row.source < source]
+    if earlier:
+        return max(row.position for row in earlier) + 1, group
+    return 0, group
+
+
+def _unique_stored_names(stored_paths) -> tuple[str, ...]:
+    names: list[str] = []
+    for stored in stored_paths:
+        name = stored_file_name(stored)
+        if name not in names:
+            names.append(name)
+    return tuple(names)
+
+
+def _pages_at_replaced_position(pages, source: int, natural, anchor: int, group: int):
+    if not natural:
+        return pages
+    kept = sorted((row for row in pages if row.source != source), key=lambda row: row.position)
+    insert_at = sum(1 for row in kept if row.position < anchor)
+    added = [
+        PageRow(source=source, page=page, part=part, group=group, position=0)
+        for _source, page, part in natural
+    ]
+    merged = list(kept[:insert_at]) + added + list(kept[insert_at:])
+    return tuple(replace(row, position=index) for index, row in enumerate(merged))
+
+
+def _filename_only(message: str) -> str:
+    if "/" in message or "\\" in message or "Errno" in message:
+        return "原本を開けません。"
+    return message
+
+
+def _editor_problem_message(folder: Path | None, card: Card) -> str | None:
+    """開けない原本のファイル名だけ。カード内の他の原本は案内に入れない。"""
+    from .layout import resolve_stored_path
+    from .stamp import open_source, source_is_unusable
+
+    if folder is None:
+        return None
+    missing: list[str] = []
+    blocked: list[str] = []
+    for stored in _flat_card_files(card):
+        name = stored_file_name(stored)
+        state = check_original(folder, stored)
+        if state is OriginalState.MISSING:
+            missing.append(name)
+            continue
+        if state is OriginalState.UNREADABLE:
+            blocked.append(name)
+            continue
+        try:
+            path = resolve_stored_path(folder, stored)
+        except ValueError:
+            blocked.append(name)
+            continue
+        if source_is_unusable(str(path), fresh=True):
+            if name not in missing:
+                missing.append(name)
+            continue
+        document = None
+        try:
+            document = open_source(str(path))
+        except FileNotFoundError:
+            missing.append(name)
+        except Exception:
+            blocked.append(name)
+        finally:
+            if document is not None:
+                document.close()
+    parts: list[str] = []
+    if missing:
+        parts.append(missing_original_message(tuple(missing)))
+    if blocked:
+        parts.append(unreadable_original_message(tuple(blocked)))
+    if not parts:
+        return None
+    return " ".join(parts)
 
 
 def _whole(value) -> int:
@@ -1363,6 +2005,11 @@ def _sources_in_span(rows, start: int, count: int):
         for row in rows
         if start <= row.source < start + count
     )
+
+
+def _drop_pages(pages, start: int, old_count: int, new_count: int):
+    dropped = _drop_sources(pages, start, old_count, new_count)
+    return dropped or None
 
 
 def _drop_sources(rows, start: int, old_count: int, new_count: int):

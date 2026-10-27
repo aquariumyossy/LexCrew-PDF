@@ -68,9 +68,14 @@ def test_one_corrupt_file_does_not_stop_the_other(tmp_path):
     previous.write_bytes(b"%PDF-old")
     bad = OutputJob(2, (str(bad_path),), "甲第２号証", "甲002：契約.pdf", 0, False, None)
     result = write_jobs(tmp_path, (good, bad), last_written=("甲002：契約.pdf",))
-    assert (tmp_path / "LexCrew-PDF-Downloads" / "甲001：契約.pdf").is_file()
+    dest = tmp_path / "LexCrew-PDF-Downloads"
+    assert not (dest / "甲001：契約.pdf").exists()
     assert previous.read_bytes() == b"%PDF-old"
+    assert result["written"] == []
+    assert result["deleted"] == ()
     assert len(result["errors"]) == 1
+    assert str(bad_path) not in result["errors"][0]["message"]
+    assert "Errno" not in result["errors"][0]["message"]
 
 
 def test_names_missing_from_last_written_are_deleted(tmp_path):
@@ -385,8 +390,8 @@ def test_stamp_off_still_masks_and_numbers_pages_when_the_font_exists(tmp_path, 
         written.close()
 
 
-def test_a_file_this_app_did_not_write_is_not_replaced(tmp_path):
-    _require_font()
+def test_a_file_this_app_did_not_write_is_not_replaced(tmp_path, monkeypatch):
+    _use_cjk_font(monkeypatch)
     dest = tmp_path / "LexCrew-PDF-Downloads"
     dest.mkdir()
     foreign = dest / "甲001 契約書.pdf"
@@ -396,7 +401,9 @@ def test_a_file_this_app_did_not_write_is_not_replaced(tmp_path):
     assert foreign.read_bytes() == b"%PDF-foreign"
     assert result["written"] == []
     assert result["errors"][0]["message"] == "同じ名前のファイルがあるため、書けませんでした。"
-    assert "甲001 契約書.pdf" in result["keep"]
+    assert result["keep"] == ()
+    assert result["deleted"] == ()
+    assert result["replaced"] == ()
 
 
 def test_a_foreign_pdf_with_different_case_is_not_replaced(tmp_path):
@@ -458,8 +465,8 @@ def test_foreign_pdf_stays_and_the_card_uses_the_next_name(tmp_path):
     assert not (dest / "甲001 契約書 (2).pdf").exists()
 
 
-def test_generate_preview_names_replacement_and_deletion(tmp_path):
-    _require_font()
+def test_generate_preview_names_replacement_and_deletion(tmp_path, monkeypatch):
+    _use_cjk_font(monkeypatch)
     from lexcrew_pdf.session import Session
 
     source = tmp_path / "a.pdf"
@@ -468,7 +475,10 @@ def test_generate_preview_names_replacement_and_deletion(tmp_path):
     session.add_file(1, 0, str(source))
     session.set_title(1, "契約書", 0)
     first = session.preview_generate()
-    assert first == {"replace": [], "delete": [], "keep": []}
+    assert first["replace"] == []
+    assert first["delete"] == []
+    assert first["keep"] == []
+    assert first["writing"] == ["甲001 契約書.pdf"]
     session.generate()
     session.set_title(1, "領収書", 0)
     preview = session.preview_generate()

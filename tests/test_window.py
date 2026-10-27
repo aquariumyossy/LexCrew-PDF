@@ -811,13 +811,13 @@ def test_move_branch_carries_pages_and_split_without_opening_pdfs(tmp_path, monk
     monkeypatch.setattr(fitz, "open", refuse_open)
     session.move_slot(1, 0, 2)
     assert session.layout.cards[0].split_a4 is True
-    assert [slot.files[0] for slot in session.layout.cards[0].slots] == ["b.pdf", "c.pdf"]
+    assert [Path(slot.files[0]).name for slot in session.layout.cards[0].slots] == ["b.pdf", "c.pdf"]
     assert session.layout.cards[0].pages == (
         PageRow(source=0, page=0, part=0, group=1, position=0),
         PageRow(source=1, page=0, part=0, group=2, position=1),
     )
     assert session.layout.cards[1].split_a4 is True
-    assert session.layout.cards[1].slots[0].files == ("a.pdf",)
+    assert [Path(item).name for item in session.layout.cards[1].slots[0].files] == ["a.pdf"]
     assert session.layout.cards[1].pages == (
         PageRow(source=0, page=0, part=0, group=0, position=0),
         PageRow(source=0, page=0, part=1, group=1, position=1),
@@ -870,6 +870,662 @@ def test_boot_uses_the_download_folder(monkeypatch, tmp_path):
     assert session.folder == tmp_path
     assert session.view()["outputDir"] == str(tmp_path / "LexCrew-PDF-Downloads")
     assert [card["number"] for card in session.view()["cards"]] == [1, 2, 3, 4, 5, 6]
+
+
+def test_boot_starts_when_the_output_folder_cannot_be_read(monkeypatch, tmp_path):
+    case = tmp_path / "case"
+    output = case / "LexCrew-PDF-Downloads"
+    output.mkdir(parents=True)
+    (output / "layout.json").write_text("{}", encoding="utf-8")
+    output.chmod(0)
+    monkeypatch.setenv("LEXCREW_FOLDER", str(case))
+    try:
+        try:
+            session = app_window.boot()
+        except Exception:
+            pytest.fail("起動できません。")
+        assert session.folder == case
+        assert session.notice == "配置ファイルを読めません。"
+        view = session.view()
+        assert view["message"] == "配置ファイルを読めません。"
+        assert [card["number"] for card in view["cards"]] == [1, 2, 3, 4, 5, 6]
+    finally:
+        output.chmod(0o755)
+
+
+def test_edit_after_unreadable_boot_reloads_the_saved_layout(monkeypatch, tmp_path):
+    source = tmp_path / "契約書.pdf"
+    _pdf(source, ["BODY"])
+    case = tmp_path / "case"
+    case.mkdir()
+    prepared = Session(case)
+    prepared.add_file(1, 0, str(source))
+    prepared.set_title(1, "契約書", 0)
+    stored_name = Path(prepared.layout.cards[0].slots[0].files[0]).name
+    output = case / "LexCrew-PDF-Downloads"
+    layout_file = output / "layout.json"
+    before = layout_file.read_bytes()
+    assert "契約書" in before.decode("utf-8")
+    output.chmod(0)
+    monkeypatch.setenv("LEXCREW_FOLDER", str(case))
+    try:
+        session = app_window.boot()
+        assert session.notice == "配置ファイルを読めません。"
+        assert session.view()["message"] == "配置ファイルを読めません。"
+        with pytest.raises(OSError):
+            session.add_card()
+    finally:
+        output.chmod(0o755)
+    assert layout_file.read_bytes() == before
+    refused = session.add_card()
+    assert refused["ok"] is False
+    assert refused["message"] == "配置を読み直しました。もう一度操作してください。"
+    assert layout_file.read_bytes() == before
+    shown = session.view()
+    assert shown["cards"][0]["title"] == "契約書"
+    assert shown["message"] == ""
+    session.add_card()
+    saved = json.loads(layout_file.read_text(encoding="utf-8"))
+    first = saved["cards"][0]
+    assert first["slots"][0]["title"] == "契約書"
+    assert stored_name in first["slots"][0]["files"][0]
+    assert len(saved["cards"]) == 7
+    assert session.notice == ""
+    assert session.view()["message"] == ""
+
+
+def test_second_confirm_shows_the_names_that_will_be_written():
+    source = (Path(__file__).resolve().parents[1] / "ui" / "app.js").read_text(encoding="utf-8")
+    start = source.index("function confirmGenerate")
+    end = source.index("\nconst help")
+    script = (
+        "const calls = [];\n"
+        "const window = { confirm(text) { calls.push(text); return true; } };\n"
+        + source[start:end]
+        + "confirmGenerate({replace: [], delete: ['甲001 契約.pdf'], keep: [], writing: ['甲001 変更.pdf']});\n"
+        + "confirmGenerate({replace: [], delete: ['甲001 契約.pdf'], keep: [], writing: ['甲001 別.pdf']});\n"
+        + "confirmGenerate({replace: [], delete: [], keep: [], writing: ['甲001 初回.pdf']});\n"
+        + "process.stdout.write(JSON.stringify(calls));\n"
+    )
+    completed = subprocess.run(["node"], input=script, capture_output=True, text=True, check=True)
+    calls = json.loads(completed.stdout)
+    assert len(calls) == 2
+    assert calls[0] != calls[1]
+    assert "次のファイルを書きます。" in calls[0]
+    assert "甲001 変更.pdf" in calls[0]
+    assert "甲001 別.pdf" in calls[1]
+    assert "変更" not in calls[1]
+    assert "甲001 契約.pdf" in calls[0]
+    assert "甲001 契約.pdf" in calls[1]
+
+
+_UI_DOCUMENT = r"""
+function dataKey(name) {
+  return name.slice(5).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
+}
+
+function matches(el, selector) {
+  if (!el || !selector) return false;
+  if (selector.charAt(0) === "[" && selector.charAt(selector.length - 1) === "]") {
+    const body = selector.slice(1, -1);
+    const eq = body.indexOf("=");
+    if (eq === -1) {
+      if (body.indexOf("data-") === 0) {
+        return Object.prototype.hasOwnProperty.call(el.dataset, dataKey(body));
+      }
+      return Object.prototype.hasOwnProperty.call(el.attributes, body);
+    }
+    const name = body.slice(0, eq);
+    let value = body.slice(eq + 1);
+    if (value.charAt(0) === '"' && value.charAt(value.length - 1) === '"') value = value.slice(1, -1);
+    if (name.indexOf("data-") === 0) return el.dataset[dataKey(name)] === value;
+    return el.attributes[name] === value;
+  }
+  if (selector.charAt(0) === ".") return el.classList.contains(selector.slice(1));
+  if (selector.charAt(0) === "#") return el.id === selector.slice(1);
+  return el.tag === selector;
+}
+
+function descendants(root) {
+  const out = [];
+  (function visit(node) {
+    for (const child of node.children) {
+      out.push(child);
+      visit(child);
+    }
+  })(root);
+  return out;
+}
+
+function queryAll(root, selector) {
+  const found = [];
+  for (const group of selector.split(",")) {
+    const steps = group.trim().split(/\s+/).filter(Boolean);
+    let scope = [root];
+    for (const step of steps) {
+      const next = [];
+      for (const node of scope) {
+        for (const el of descendants(node)) {
+          if (matches(el, step)) next.push(el);
+        }
+      }
+      scope = next;
+    }
+    for (const el of scope) {
+      if (!found.includes(el)) found.push(el);
+    }
+  }
+  return found;
+}
+
+function createNode(tag) {
+  const children = [];
+  const classes = new Set();
+  const node = {
+    tag: tag,
+    id: "",
+    children: children,
+    parent: null,
+    className: "",
+    hidden: false,
+    disabled: false,
+    readOnly: false,
+    draggable: false,
+    value: "",
+    textContent: "",
+    alt: "",
+    title: "",
+    type: "",
+    src: "",
+    dataset: {},
+    style: {},
+    attributes: {},
+    listeners: {},
+    classList: {
+      contains(name) { return classes.has(name); },
+      add(name) { classes.add(name); },
+      remove(name) { classes.delete(name); },
+      toggle(name, force) {
+        const next = force === undefined ? !classes.has(name) : Boolean(force);
+        if (next) classes.add(name);
+        else classes.delete(name);
+        return next;
+      },
+    },
+  };
+  node.setAttribute = (key, value) => { node.attributes[key] = String(value); };
+  node.getAttribute = (key) => node.attributes[key];
+  node.addEventListener = (type, fn) => {
+    if (!node.listeners[type]) node.listeners[type] = [];
+    node.listeners[type].push(fn);
+  };
+  node.appendChild = (child) => {
+    child.parent = node;
+    children.push(child);
+    return child;
+  };
+  node.append = (...kids) => { kids.forEach((child) => node.appendChild(child)); };
+  node.closest = (selector) => {
+    let current = node;
+    while (current) {
+      if (matches(current, selector)) return current;
+      current = current.parent;
+    }
+    return null;
+  };
+  node.querySelector = (selector) => queryAll(node, selector)[0] || null;
+  node.querySelectorAll = (selector) => queryAll(node, selector);
+  node.getBoundingClientRect = () => ({ left: 0, right: 10, top: 0, bottom: 10, width: 10, height: 10 });
+  Object.defineProperty(node, "innerHTML", {
+    configurable: true,
+    get() { return ""; },
+    set(value) { if (value === "") children.length = 0; },
+  });
+  return node;
+}
+
+const documentNode = createNode("document");
+documentNode.body = createNode("body");
+documentNode.appendChild(documentNode.body);
+documentNode.activeElement = null;
+documentNode.createElement = createNode;
+documentNode.getElementById = (id) => {
+  const all = [documentNode].concat(descendants(documentNode));
+  for (const el of all) if (el.id === id) return el;
+  return null;
+};
+const ids = [
+  "series", "series-menu", "series-open", "cards", "first-number", "merge-branches",
+  "grayscale", "page-numbers", "clear", "generate", "help", "help-open", "help-close",
+  "output", "banner", "stamp-settings", "stamp-size", "stamp-size-readout", "stamp-sample",
+  "stamp-mincho", "stamp-gothic", "stamp-enabled", "stamp-open", "stamp-close",
+  "page-number-settings", "page-number-size", "page-number-size-readout", "page-number-sample",
+  "page-number-enabled", "page-number-mincho", "page-number-gothic", "page-number-close",
+];
+for (const id of ids) {
+  const tag = id === "series" || id === "first-number" || id.endsWith("-size") ? "input" : "div";
+  const el = createNode(tag);
+  el.id = id;
+  if (id === "stamp-size") el.value = "11";
+  if (id === "page-number-size") el.value = "8";
+  if (id === "first-number") el.value = "1";
+  documentNode.body.appendChild(el);
+}
+global.document = documentNode;
+global.window = {
+  listeners: {},
+  addEventListener(type, fn) {
+    if (!this.listeners[type]) this.listeners[type] = [];
+    this.listeners[type].push(fn);
+  },
+  setTimeout(fn, ms) { return global.setTimeout(fn, ms); },
+  clearTimeout(id) { return global.clearTimeout(id); },
+  confirm() { return true; },
+};
+"""
+
+_UI_GENERATE_HELPERS = r"""
+function sampleView() {
+  return {
+    labelTemplate: "甲第N号証",
+    firstNumber: 1,
+    stampEnabled: true,
+    outputDir: "C:/out",
+    mergeBranches: true,
+    grayscale: false,
+    pageNumbers: { enabled: false },
+    cards: [{
+      number: 1,
+      hasFile: true,
+      message: "",
+      mergeWarning: "",
+      splitA4: false,
+      slots: [{
+        index: 0,
+        label: "甲第１号証",
+        filename: "甲001",
+        outputNote: "",
+        rotation: 0,
+        splittable: false,
+        files: [{ index: 0, name: "契約.pdf", missing: false }],
+      }],
+    }],
+  };
+}
+
+function treeText(node) {
+  let text = node.textContent || "";
+  for (const child of node.children || []) text += treeText(child);
+  return text;
+}
+
+function byText(label) {
+  const found = [];
+  (function visit(node) {
+    if (node.textContent === label) found.push(node);
+    for (const child of node.children || []) visit(child);
+  })(document.getElementById("cards"));
+  return found;
+}
+
+function clickGenerate() {
+  const button = document.getElementById("generate");
+  const handlers = (button.listeners && button.listeners.click) || [];
+  if (!handlers.length) throw new Error("generate click handler missing");
+  return handlers[handlers.length - 1]();
+}
+
+function seedThumb() {
+  const cards = document.getElementById("cards");
+  const image = document.createElement("img");
+  image.dataset.thumb = "1-0";
+  image.src = "data:image/jpeg;base64,KEEP";
+  const button = document.createElement("button");
+  button.textContent = "差替";
+  const input = document.createElement("input");
+  cards.appendChild(image);
+  cards.appendChild(button);
+  cards.appendChild(input);
+  return { image: image, button: button, input: input };
+}
+
+function finish(payload) {
+  process.stdout.write(JSON.stringify(payload));
+}
+"""
+
+
+def _ui_generate(scenario: str) -> dict:
+    source = (Path(__file__).resolve().parents[1] / "ui" / "app.js").read_text(encoding="utf-8")
+    script = _UI_DOCUMENT + source + "\n" + _UI_GENERATE_HELPERS + "\n" + scenario
+    completed = subprocess.run(["node"], input=script, capture_output=True, text=True)
+    if completed.returncode != 0 or not completed.stdout.strip():
+        detail = (completed.stderr or completed.stdout or "node produced no output")[-4000:]
+        raise AssertionError(detail)
+    return json.loads(completed.stdout)
+
+
+def test_cancel_generate_confirm_keeps_thumbnails():
+    result = _ui_generate(
+        r"""
+        (async () => {
+          const calls = { preview: 0, generate: 0, state: 0, media: 0 };
+          const during = [];
+          view = sampleView();
+          const seeded = seedThumb();
+          window.confirm = () => {
+            during.push({
+              button: seeded.button.disabled,
+              input: seeded.input.disabled,
+              generate: document.getElementById("generate").disabled,
+              clear: document.getElementById("clear").disabled,
+              editing: treeText(document.getElementById("cards")).indexOf("編集中") !== -1,
+            });
+            return false;
+          };
+          api = {
+            preview_generate() {
+              calls.preview += 1;
+              return Promise.resolve({ replace: ["甲001.pdf"], delete: [], keep: [], writing: [] });
+            },
+            generate() { calls.generate += 1; return Promise.resolve({}); },
+            state() { calls.state += 1; return Promise.resolve(view); },
+            media() { calls.media += 1; return Promise.resolve({ ok: true, slots: [] }); },
+          };
+          await clickGenerate();
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          const image = document.querySelector('[data-thumb="1-0"]');
+          finish({
+            calls: calls,
+            during: during,
+            sameImage: image === seeded.image,
+            src: image && image.src,
+            button: seeded.button.disabled,
+            input: seeded.input.disabled,
+            generate: document.getElementById("generate").disabled,
+            clear: document.getElementById("clear").disabled,
+          });
+        })().catch((error) => { console.error(error && error.stack || error); process.exit(1); });
+        """
+    )
+    assert result["calls"] == {"preview": 1, "generate": 0, "state": 0, "media": 0}
+    assert result["sameImage"] is True
+    assert result["src"] == "data:image/jpeg;base64,KEEP"
+    assert result["during"] == [{
+        "button": True,
+        "input": True,
+        "generate": True,
+        "clear": True,
+        "editing": False,
+    }]
+    assert result["button"] is False
+    assert result["input"] is False
+    assert result["generate"] is False
+    assert result["clear"] is False
+
+
+def test_cancel_second_generate_confirm_keeps_thumbnails():
+    result = _ui_generate(
+        r"""
+        (async () => {
+          const calls = { preview: 0, generate: 0, state: 0, media: 0 };
+          const during = [];
+          let confirms = 0;
+          view = sampleView();
+          const seeded = seedThumb();
+          window.confirm = () => {
+            confirms += 1;
+            during.push({
+              button: seeded.button.disabled,
+              input: seeded.input.disabled,
+              generate: document.getElementById("generate").disabled,
+              clear: document.getElementById("clear").disabled,
+              src: seeded.image.src,
+            });
+            return confirms === 1;
+          };
+          api = {
+            preview_generate() {
+              calls.preview += 1;
+              return Promise.resolve({ replace: ["甲001.pdf"], delete: [], keep: [], writing: [] });
+            },
+            generate() {
+              calls.generate += 1;
+              return Promise.resolve({
+                needsConfirm: true,
+                replace: ["甲001.pdf"],
+                delete: [],
+                keep: [],
+                writing: ["甲002.pdf"],
+              });
+            },
+            state() { calls.state += 1; return Promise.resolve(view); },
+            media() { calls.media += 1; return Promise.resolve({ ok: true, slots: [] }); },
+          };
+          await clickGenerate();
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          const image = document.querySelector('[data-thumb="1-0"]');
+          finish({
+            calls: calls,
+            during: during,
+            sameImage: image === seeded.image,
+            src: image && image.src,
+            button: seeded.button.disabled,
+            input: seeded.input.disabled,
+            generate: document.getElementById("generate").disabled,
+            clear: document.getElementById("clear").disabled,
+          });
+        })().catch((error) => { console.error(error && error.stack || error); process.exit(1); });
+        """
+    )
+    assert result["calls"] == {"preview": 1, "generate": 1, "state": 0, "media": 0}
+    assert result["sameImage"] is True
+    assert result["src"] == "data:image/jpeg;base64,KEEP"
+    assert result["during"] == [
+        {"button": True, "input": True, "generate": True, "clear": True, "src": "data:image/jpeg;base64,KEEP"},
+        {"button": True, "input": True, "generate": True, "clear": True, "src": "data:image/jpeg;base64,KEEP"},
+    ]
+    assert result["button"] is False
+    assert result["input"] is False
+    assert result["generate"] is False
+    assert result["clear"] is False
+
+
+def test_generate_success_restores_thumbnails_and_enables_controls():
+    result = _ui_generate(
+        r"""
+        (async () => {
+          const calls = { preview: 0, generate: 0, state: 0, media: 0 };
+          const during = [];
+          const saved = sampleView();
+          view = saved;
+          seedThumb();
+          window.confirm = () => {
+            render();
+            const removal = byText("削除")[0];
+            const name = document.querySelector("#cards input");
+            during.push({
+              removal: Boolean(removal && removal.disabled),
+              input: Boolean(name && name.disabled),
+              generate: document.getElementById("generate").disabled,
+              clear: document.getElementById("clear").disabled,
+              editing: treeText(document.getElementById("cards")).indexOf("編集中") !== -1,
+            });
+            return true;
+          };
+          api = {
+            preview_generate() {
+              calls.preview += 1;
+              return Promise.resolve({ replace: ["甲001.pdf"], delete: [], keep: [], writing: ["甲001.pdf"] });
+            },
+            generate() {
+              calls.generate += 1;
+              return Promise.resolve(saved);
+            },
+            state() {
+              calls.state += 1;
+              return Promise.resolve(saved);
+            },
+            media() {
+              calls.media += 1;
+              return Promise.resolve({
+                ok: true,
+                slots: [{ index: 0, thumb: "AFTER", pageCount: 2, splittable: false }],
+              });
+            },
+          };
+          await clickGenerate();
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          const image = document.querySelector('[data-thumb="1-0"]');
+          const removal = byText("削除")[0];
+          const name = document.querySelector("#cards input");
+          const pages = document.querySelector('[data-pages="1-0"]');
+          finish({
+            calls: calls,
+            during: during,
+            src: image && image.src,
+            removal: Boolean(removal && removal.disabled),
+            input: Boolean(name && name.disabled),
+            generate: document.getElementById("generate").disabled,
+            clear: document.getElementById("clear").disabled,
+            pages: pages && pages.textContent,
+            pagesHidden: Boolean(pages && pages.hidden),
+          });
+        })().catch((error) => { console.error(error && error.stack || error); process.exit(1); });
+        """
+    )
+    assert result["calls"]["generate"] == 1
+    assert result["calls"]["preview"] == 1
+    assert result["calls"]["state"] >= 1
+    assert result["calls"]["media"] >= 1
+    assert result["during"] == [{
+        "removal": True,
+        "input": True,
+        "generate": True,
+        "clear": True,
+        "editing": False,
+    }]
+    assert result["src"] == "data:image/jpeg;base64,AFTER"
+    assert result["removal"] is False
+    assert result["input"] is False
+    assert result["generate"] is False
+    assert result["clear"] is False
+    assert result["pages"] == "2ページ"
+    assert result["pagesHidden"] is False
+
+
+def test_stale_unshown_layout_is_not_deleted_or_cleared(monkeypatch, tmp_path):
+    first = tmp_path / "a.pdf"
+    second = tmp_path / "b.pdf"
+    _pdf(first, ["A"])
+    _pdf(second, ["B"])
+    case = tmp_path / "case"
+    case.mkdir()
+    prepared = Session(case)
+    prepared.add_file(1, 0, str(first))
+    prepared.set_title(1, "一番", 0)
+    prepared.add_file(2, 0, str(second))
+    prepared.set_title(2, "二番", 0)
+    output = case / "LexCrew-PDF-Downloads"
+    layout_file = output / "layout.json"
+    before = layout_file.read_bytes()
+    output.chmod(0)
+    monkeypatch.setenv("LEXCREW_FOLDER", str(case))
+    try:
+        session = app_window.boot()
+        assert [card["title"] for card in session.view()["cards"][:2]] == ["", ""]
+    finally:
+        output.chmod(0o755)
+    api = app_window.Api(session)
+    refused = api.delete_slot(2, 0)
+    assert refused["ok"] is False
+    assert refused["message"] == "配置を読み直しました。もう一度操作してください。"
+    assert [card["title"] for card in refused["cards"][:2]] == ["一番", "二番"]
+    assert layout_file.read_bytes() == before
+    refused_clear = api.clear()
+    assert refused_clear["ok"] is False
+    assert refused_clear["message"] == "配置を読み直しました。もう一度操作してください。"
+    assert layout_file.read_bytes() == before
+    refused_choose = api.choose_pdf(1, 0)
+    assert refused_choose["ok"] is False
+    assert refused_choose["message"] == "配置を読み直しました。もう一度操作してください。"
+    assert layout_file.read_bytes() == before
+    shown = api.state()
+    assert [card["title"] for card in shown["cards"][:2]] == ["一番", "二番"]
+    api.delete_slot(2, 0)
+    reloaded = Session(case)
+    titles = [card.slots[0].title for card in reloaded.layout.cards if card.slots[0].files]
+    assert titles == ["一番"]
+
+
+def test_stale_generate_writes_nothing(monkeypatch, tmp_path):
+    source = tmp_path / "a.pdf"
+    _pdf(source, ["A"])
+    case = tmp_path / "case"
+    case.mkdir()
+    prepared = Session(case)
+    prepared.add_file(1, 0, str(source))
+    prepared.set_title(1, "一番", 0)
+    output = case / "LexCrew-PDF-Downloads"
+    layout_file = output / "layout.json"
+    before = layout_file.read_bytes()
+    output.chmod(0)
+    monkeypatch.setenv("LEXCREW_FOLDER", str(case))
+    try:
+        session = app_window.boot()
+    finally:
+        output.chmod(0o755)
+    refused = app_window.Api(session).generate()
+    assert refused["ok"] is False
+    assert refused["message"] == "配置を読み直しました。もう一度操作してください。"
+    assert refused["written"] == []
+    assert layout_file.read_bytes() == before
+    assert list(output.glob("*.pdf")) == []
+
+
+def _assert_layout_banner(result):
+    assert result["ok"] is False
+    assert result["message"] == "配置ファイルを読めません。"
+    assert "Errno" not in result["message"]
+    assert "PermissionError" not in result["message"]
+
+
+def test_unreadable_layout_uses_one_banner(monkeypatch, tmp_path):
+    case = tmp_path / "case"
+    output = case / "LexCrew-PDF-Downloads"
+    output.mkdir(parents=True)
+    layout_file = output / "layout.json"
+    layout_file.write_text("{}", encoding="utf-8")
+    before = layout_file.read_bytes()
+    output.chmod(0)
+    monkeypatch.setenv("LEXCREW_FOLDER", str(case))
+    try:
+        session = app_window.boot()
+        api = app_window.Api(session)
+        _assert_layout_banner(api.preview_generate())
+        _assert_layout_banner(api.generate())
+        _assert_layout_banner(api.add_card())
+        _assert_layout_banner(api.delete_slot(2, 0))
+        _assert_layout_banner(api.move_slot(1, 0, None))
+        _assert_layout_banner(api.open_editor(1, 0))
+        _assert_layout_banner(api.choose_pdf(1, 0))
+        _assert_layout_banner(api.clear())
+    finally:
+        output.chmod(0o755)
+    assert layout_file.read_bytes() == before
+
+    readable = tmp_path / "empty-json"
+    empty_output = readable / "LexCrew-PDF-Downloads"
+    empty_output.mkdir(parents=True)
+    empty_layout = empty_output / "layout.json"
+    empty_layout.write_text("{}", encoding="utf-8")
+    empty_session = Session(readable)
+    empty_api = app_window.Api(empty_session)
+    _assert_layout_banner(empty_api.preview_generate())
+    _assert_layout_banner(empty_api.generate())
+    _assert_layout_banner(empty_api.delete_slot(1, 0))
+    _assert_layout_banner(empty_api.clear())
+    assert empty_layout.read_text(encoding="utf-8") == "{}"
 
 
 def test_boot_uses_lexcrew_folder_when_set(monkeypatch, tmp_path):

@@ -18,6 +18,30 @@ def _row(page, group, position, source=0, part=0):
     }
 
 
+def test_a_source_without_a_saved_row_stays_in_its_own_slot():
+    natural = [(0, 0, 0), (0, 1, 0), (1, 0, 0)]
+    buckets = arrange_pages(
+        natural,
+        [_row(1, 1, 0, source=0), _row(0, 1, 1, source=0)],
+        max_group=2,
+        files_per_slot=[1, 1],
+    )
+    assert buckets[1] == [(0, 1, 0), (0, 0, 0)]
+    assert buckets[2] == [(1, 0, 0)]
+
+
+def test_extra_pages_of_a_source_that_has_rows_stay_on_the_primary_group():
+    natural = [(0, 0, 0), (0, 1, 0), (1, 0, 0)]
+    buckets = arrange_pages(
+        natural,
+        [_row(0, 1, 0, source=0), _row(0, 2, 1, source=1)],
+        max_group=2,
+        files_per_slot=[1, 1],
+    )
+    assert buckets[1] == [(0, 0, 0), (0, 1, 0)]
+    assert buckets[2] == [(1, 0, 0)]
+
+
 def test_new_pages_append_to_the_primary_group_and_stale_refs_drop():
     buckets = arrange_pages(
         [(0, 0, 0), (0, 1, 0), (0, 2, 0)],

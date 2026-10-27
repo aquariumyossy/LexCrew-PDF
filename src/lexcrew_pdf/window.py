@@ -10,8 +10,13 @@ import unicodedata
 from ctypes import wintypes
 from pathlib import Path
 
-from .layout import FILE_DIALOG_TYPES, require_source_file
-from .session import Session, downloads_dir
+from .layout import (
+    FILE_DIALOG_TYPES,
+    missing_original_message,
+    require_source_file,
+    unreadable_original_message,
+)
+from .session import Session, _LAYOUT_RETRY, downloads_dir
 
 # ハンドルを関数の中だけに置くと、ガベージコレクションでミューテックスが外れる。
 _instance_handle = None
@@ -32,7 +37,12 @@ def output_root() -> Path:
 
 def boot() -> Session:
     session = Session(output_root())
-    session.view()
+    try:
+        session.view()
+    except OSError:
+        # 出力先が読めなくても窓は開く。案内は Session が既に持っている文を使う。
+        if not session.notice:
+            session.notice = "配置ファイルを読めません。"
     print("cards-ready", flush=True)
     return session
 
@@ -259,19 +269,28 @@ class Api:
     def add_branch(self, number: int) -> dict:
         return self._run(lambda: self.session.add_branch(int(number)))
 
+    def remove_file(self, number: int, slot_index: int, file_index: int) -> dict:
+        return self._run(lambda: self.session.remove_file(int(number), int(slot_index), int(file_index)))
+
     def delete_slot(self, number: int, slot_index: int) -> dict:
-        before = self.session.editor_identity()
-        view = self._run(lambda: self.session.delete_slot(int(number), int(slot_index)))
-        after = self.session.editor_identity()
+        try:
+            before = self.session.editor_identity()
+            view = self._run(lambda: self.session.delete_slot(int(number), int(slot_index)))
+            after = self.session.editor_identity()
+        except OSError as exc:
+            return self._layout_banner(exc)
         if after and before != after:
             self._notify_editor(f"window.retarget({int(after['number'])}, {int(after['slot'])})")
         return view
 
     def move_slot(self, number: int, slot_index: int, before_number=None) -> dict:
-        before = self.session.editor_identity()
-        target = None if before_number is None else int(before_number)
-        view = self._run(lambda: self.session.move_slot(int(number), int(slot_index), target))
-        after = self.session.editor_identity()
+        try:
+            before = self.session.editor_identity()
+            target = None if before_number is None else int(before_number)
+            view = self._run(lambda: self.session.move_slot(int(number), int(slot_index), target))
+            after = self.session.editor_identity()
+        except OSError as exc:
+            return self._layout_banner(exc)
         if after and before != after:
             self._notify_editor(f"window.retarget({int(after['number'])}, {int(after['slot'])})")
         return view
@@ -292,6 +311,11 @@ class Api:
             self.session.ensure_editable(int(number))
         except ValueError as exc:
             return {**self.session.view(), "ok": False, "message": str(exc)}
+        except OSError as exc:
+            return self._layout_banner(exc)
+        if self.session._view_is_stale:
+            refreshed = self.session.view()
+            return {**refreshed, "ok": False, "message": _LAYOUT_RETRY}
         chosen = self._window.create_file_dialog(
             webview.FileDialog.OPEN,
             allow_multiple=True,
@@ -319,6 +343,8 @@ class Api:
             self.session.begin_edit(number, slot_index)
         except ValueError as exc:
             return {**self.session.view(), "ok": False, "message": str(exc)}
+        except OSError as exc:
+            return self._layout_banner(exc)
         try:
             self._present_editor(number, slot_index)
         except Exception:
@@ -328,7 +354,10 @@ class Api:
         return self.session.view()
 
     def editor(self, number: int, slot_index: int = 0) -> dict:
-        return self._run(lambda: self.session.editor(int(number), int(slot_index)))
+        try:
+            return self.session.editor(int(number), int(slot_index))
+        except Exception as exc:
+            return {**self.session.view(), "ok": False, "message": _editor_error(exc)}
 
     def set_pages(self, number: int, slot_index: int, pages: list) -> dict:
         return self._run(lambda: self.session.set_pages(int(number), pages, int(slot_index)))
@@ -340,9 +369,9 @@ class Api:
         try:
             return self.session.media(int(number))
         except ValueError as exc:
-            return {"ok": False, "message": str(exc), "slots": []}
-        except OSError as exc:
-            return {"ok": False, "message": f"原本を開けません。{exc}", "slots": []}
+            return {"ok": False, "message": _editor_error(exc), "slots": []}
+        except OSError:
+            return {"ok": False, "message": "原本を開けません。", "slots": []}
 
     def preview(self, number: int, slot_index: int, page_index: int, zoom: float = 1.15) -> dict:
         return self._run(lambda: self.session.preview(int(number), int(slot_index), int(page_index), float(zoom)))
@@ -366,8 +395,15 @@ class Api:
     def preview_generate(self) -> dict:
         return self._run(self.session.preview_generate)
 
-    def generate(self) -> dict:
-        result = self._run(self.session.generate)
+    def generate(self, expected=None) -> dict:
+        try:
+            preview = self.session.preview_generate()
+            pending = bool(preview.get("replace") or preview.get("delete") or preview.get("keep"))
+            if pending and _preview_token(preview) != _preview_token(expected):
+                return {"ok": False, "needsConfirm": True, "written": [], **preview}
+            result = self.session.generate()
+        except Exception as exc:
+            return {**self.session.view(), "ok": False, "message": _editor_error(exc)}
         written = result.get("written") or ()
         output = result.get("outputDir") or ""
         if written and output:
@@ -375,11 +411,16 @@ class Api:
         return result
 
     def clear(self) -> dict:
+        try:
+            view = self.session.clear()
+        except OSError as exc:
+            return self._layout_banner(exc)
+        if view.get("ok") is False:
+            return view
         editor = None
         with self.session._lock:
             editor = self._editor_window
             self._editor_window = None
-            view = self.session.clear()
         if editor is not None:
             try:
                 editor.destroy()
@@ -387,11 +428,14 @@ class Api:
                 pass
         return view
 
+    def _layout_banner(self, exc: BaseException) -> dict:
+        return {**self.session.view(), "ok": False, "message": _editor_error(exc)}
+
     def _run(self, fn):
         try:
             return fn()
-        except ValueError as exc:
-            return {**self.session.view(), "ok": False, "message": str(exc)}
+        except Exception as exc:
+            return self._layout_banner(exc)
 
     def _save_on_close(self) -> None:
         self._closing = True
@@ -515,7 +559,10 @@ class EditorApi:
         return self._run(self.session.edit_context)
 
     def editor(self, number: int, slot_index: int = 0) -> dict:
-        return self._run(lambda: self.session.editor(int(number), int(slot_index)))
+        try:
+            return self.session.editor(int(number), int(slot_index))
+        except Exception as exc:
+            return {"ok": False, "message": _editor_error(exc)}
 
     def set_pages(self, number: int, slot_index: int, pages: list) -> dict:
         return self._commit(lambda: self.session.set_pages(int(number), pages, int(slot_index)))
@@ -613,8 +660,51 @@ class EditorApi:
     def _run(self, fn):
         try:
             return fn()
-        except ValueError as exc:
-            return {"ok": False, "message": str(exc)}
+        except Exception as exc:
+            return {"ok": False, "message": _editor_error(exc)}
+
+
+def _preview_token(preview) -> str:
+    if not isinstance(preview, dict):
+        return ""
+    keep = []
+    for row in preview.get("keep") or []:
+        if isinstance(row, dict):
+            keep.append((row.get("existing"), row.get("writing")))
+    writing = [str(name) for name in (preview.get("writing") or [])]
+    return "\n".join([
+        "replace:" + "\n".join(preview.get("replace") or []),
+        "delete:" + "\n".join(preview.get("delete") or []),
+        "keep:" + "\n".join(f"{existing}=>{writing}" for existing, writing in keep),
+        "writing:" + "\n".join(writing),
+    ])
+
+
+def _editor_error(exc: BaseException) -> str:
+    """編集画面の失敗。原本置き場の絶対パスや Errno は出さない。"""
+    if "配置ファイルを読めません。" in str(exc):
+        return "配置ファイルを読めません。"
+    if isinstance(exc, ValueError):
+        text = str(exc)
+        if text.startswith("原本が見つかりません：") or text.startswith("原本を開けません。"):
+            return text
+        if "/" not in text and "\\" not in text and "Errno" not in text:
+            if text.isascii():
+                return "原本を開けません。"
+            return text
+    name = _exception_file_name(exc)
+    if isinstance(exc, FileNotFoundError) and name:
+        return missing_original_message((name,))
+    if name:
+        return unreadable_original_message((name,))
+    return "原本を開けません。"
+
+
+def _exception_file_name(exc: BaseException) -> str:
+    filename = getattr(exc, "filename", None)
+    if not filename:
+        return ""
+    return Path(str(filename)).name
 
 
 def _norm_name(name: str) -> str:

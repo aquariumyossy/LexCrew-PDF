@@ -959,6 +959,461 @@ def test_second_confirm_shows_the_names_that_will_be_written():
     assert "甲001 契約.pdf" in calls[1]
 
 
+_UI_DOCUMENT = r"""
+function dataKey(name) {
+  return name.slice(5).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
+}
+
+function matches(el, selector) {
+  if (!el || !selector) return false;
+  if (selector.charAt(0) === "[" && selector.charAt(selector.length - 1) === "]") {
+    const body = selector.slice(1, -1);
+    const eq = body.indexOf("=");
+    if (eq === -1) {
+      if (body.indexOf("data-") === 0) {
+        return Object.prototype.hasOwnProperty.call(el.dataset, dataKey(body));
+      }
+      return Object.prototype.hasOwnProperty.call(el.attributes, body);
+    }
+    const name = body.slice(0, eq);
+    let value = body.slice(eq + 1);
+    if (value.charAt(0) === '"' && value.charAt(value.length - 1) === '"') value = value.slice(1, -1);
+    if (name.indexOf("data-") === 0) return el.dataset[dataKey(name)] === value;
+    return el.attributes[name] === value;
+  }
+  if (selector.charAt(0) === ".") return el.classList.contains(selector.slice(1));
+  if (selector.charAt(0) === "#") return el.id === selector.slice(1);
+  return el.tag === selector;
+}
+
+function descendants(root) {
+  const out = [];
+  (function visit(node) {
+    for (const child of node.children) {
+      out.push(child);
+      visit(child);
+    }
+  })(root);
+  return out;
+}
+
+function queryAll(root, selector) {
+  const found = [];
+  for (const group of selector.split(",")) {
+    const steps = group.trim().split(/\s+/).filter(Boolean);
+    let scope = [root];
+    for (const step of steps) {
+      const next = [];
+      for (const node of scope) {
+        for (const el of descendants(node)) {
+          if (matches(el, step)) next.push(el);
+        }
+      }
+      scope = next;
+    }
+    for (const el of scope) {
+      if (!found.includes(el)) found.push(el);
+    }
+  }
+  return found;
+}
+
+function createNode(tag) {
+  const children = [];
+  const classes = new Set();
+  const node = {
+    tag: tag,
+    id: "",
+    children: children,
+    parent: null,
+    className: "",
+    hidden: false,
+    disabled: false,
+    readOnly: false,
+    draggable: false,
+    value: "",
+    textContent: "",
+    alt: "",
+    title: "",
+    type: "",
+    src: "",
+    dataset: {},
+    style: {},
+    attributes: {},
+    listeners: {},
+    classList: {
+      contains(name) { return classes.has(name); },
+      add(name) { classes.add(name); },
+      remove(name) { classes.delete(name); },
+      toggle(name, force) {
+        const next = force === undefined ? !classes.has(name) : Boolean(force);
+        if (next) classes.add(name);
+        else classes.delete(name);
+        return next;
+      },
+    },
+  };
+  node.setAttribute = (key, value) => { node.attributes[key] = String(value); };
+  node.getAttribute = (key) => node.attributes[key];
+  node.addEventListener = (type, fn) => {
+    if (!node.listeners[type]) node.listeners[type] = [];
+    node.listeners[type].push(fn);
+  };
+  node.appendChild = (child) => {
+    child.parent = node;
+    children.push(child);
+    return child;
+  };
+  node.append = (...kids) => { kids.forEach((child) => node.appendChild(child)); };
+  node.closest = (selector) => {
+    let current = node;
+    while (current) {
+      if (matches(current, selector)) return current;
+      current = current.parent;
+    }
+    return null;
+  };
+  node.querySelector = (selector) => queryAll(node, selector)[0] || null;
+  node.querySelectorAll = (selector) => queryAll(node, selector);
+  node.getBoundingClientRect = () => ({ left: 0, right: 10, top: 0, bottom: 10, width: 10, height: 10 });
+  Object.defineProperty(node, "innerHTML", {
+    configurable: true,
+    get() { return ""; },
+    set(value) { if (value === "") children.length = 0; },
+  });
+  return node;
+}
+
+const documentNode = createNode("document");
+documentNode.body = createNode("body");
+documentNode.appendChild(documentNode.body);
+documentNode.activeElement = null;
+documentNode.createElement = createNode;
+documentNode.getElementById = (id) => {
+  const all = [documentNode].concat(descendants(documentNode));
+  for (const el of all) if (el.id === id) return el;
+  return null;
+};
+const ids = [
+  "series", "series-menu", "series-open", "cards", "first-number", "merge-branches",
+  "grayscale", "page-numbers", "clear", "generate", "help", "help-open", "help-close",
+  "output", "banner", "stamp-settings", "stamp-size", "stamp-size-readout", "stamp-sample",
+  "stamp-mincho", "stamp-gothic", "stamp-enabled", "stamp-open", "stamp-close",
+  "page-number-settings", "page-number-size", "page-number-size-readout", "page-number-sample",
+  "page-number-enabled", "page-number-mincho", "page-number-gothic", "page-number-close",
+];
+for (const id of ids) {
+  const tag = id === "series" || id === "first-number" || id.endsWith("-size") ? "input" : "div";
+  const el = createNode(tag);
+  el.id = id;
+  if (id === "stamp-size") el.value = "11";
+  if (id === "page-number-size") el.value = "8";
+  if (id === "first-number") el.value = "1";
+  documentNode.body.appendChild(el);
+}
+global.document = documentNode;
+global.window = {
+  listeners: {},
+  addEventListener(type, fn) {
+    if (!this.listeners[type]) this.listeners[type] = [];
+    this.listeners[type].push(fn);
+  },
+  setTimeout(fn, ms) { return global.setTimeout(fn, ms); },
+  clearTimeout(id) { return global.clearTimeout(id); },
+  confirm() { return true; },
+};
+"""
+
+_UI_GENERATE_HELPERS = r"""
+function sampleView() {
+  return {
+    labelTemplate: "甲第N号証",
+    firstNumber: 1,
+    stampEnabled: true,
+    outputDir: "C:/out",
+    mergeBranches: true,
+    grayscale: false,
+    pageNumbers: { enabled: false },
+    cards: [{
+      number: 1,
+      hasFile: true,
+      message: "",
+      mergeWarning: "",
+      splitA4: false,
+      slots: [{
+        index: 0,
+        label: "甲第１号証",
+        filename: "甲001",
+        outputNote: "",
+        rotation: 0,
+        splittable: false,
+        files: [{ index: 0, name: "契約.pdf", missing: false }],
+      }],
+    }],
+  };
+}
+
+function treeText(node) {
+  let text = node.textContent || "";
+  for (const child of node.children || []) text += treeText(child);
+  return text;
+}
+
+function byText(label) {
+  const found = [];
+  (function visit(node) {
+    if (node.textContent === label) found.push(node);
+    for (const child of node.children || []) visit(child);
+  })(document.getElementById("cards"));
+  return found;
+}
+
+function clickGenerate() {
+  const button = document.getElementById("generate");
+  const handlers = (button.listeners && button.listeners.click) || [];
+  if (!handlers.length) throw new Error("generate click handler missing");
+  return handlers[handlers.length - 1]();
+}
+
+function seedThumb() {
+  const cards = document.getElementById("cards");
+  const image = document.createElement("img");
+  image.dataset.thumb = "1-0";
+  image.src = "data:image/jpeg;base64,KEEP";
+  const button = document.createElement("button");
+  button.textContent = "差替";
+  const input = document.createElement("input");
+  cards.appendChild(image);
+  cards.appendChild(button);
+  cards.appendChild(input);
+  return { image: image, button: button, input: input };
+}
+
+function finish(payload) {
+  process.stdout.write(JSON.stringify(payload));
+}
+"""
+
+
+def _ui_generate(scenario: str) -> dict:
+    source = (Path(__file__).resolve().parents[1] / "ui" / "app.js").read_text(encoding="utf-8")
+    script = _UI_DOCUMENT + source + "\n" + _UI_GENERATE_HELPERS + "\n" + scenario
+    completed = subprocess.run(["node"], input=script, capture_output=True, text=True)
+    if completed.returncode != 0 or not completed.stdout.strip():
+        detail = (completed.stderr or completed.stdout or "node produced no output")[-4000:]
+        raise AssertionError(detail)
+    return json.loads(completed.stdout)
+
+
+def test_cancel_generate_confirm_keeps_thumbnails():
+    result = _ui_generate(
+        r"""
+        (async () => {
+          const calls = { preview: 0, generate: 0, state: 0, media: 0 };
+          const during = [];
+          view = sampleView();
+          const seeded = seedThumb();
+          window.confirm = () => {
+            during.push({
+              button: seeded.button.disabled,
+              input: seeded.input.disabled,
+              generate: document.getElementById("generate").disabled,
+              clear: document.getElementById("clear").disabled,
+              editing: treeText(document.getElementById("cards")).indexOf("編集中") !== -1,
+            });
+            return false;
+          };
+          api = {
+            preview_generate() {
+              calls.preview += 1;
+              return Promise.resolve({ replace: ["甲001.pdf"], delete: [], keep: [], writing: [] });
+            },
+            generate() { calls.generate += 1; return Promise.resolve({}); },
+            state() { calls.state += 1; return Promise.resolve(view); },
+            media() { calls.media += 1; return Promise.resolve({ ok: true, slots: [] }); },
+          };
+          await clickGenerate();
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          const image = document.querySelector('[data-thumb="1-0"]');
+          finish({
+            calls: calls,
+            during: during,
+            sameImage: image === seeded.image,
+            src: image && image.src,
+            button: seeded.button.disabled,
+            input: seeded.input.disabled,
+            generate: document.getElementById("generate").disabled,
+            clear: document.getElementById("clear").disabled,
+          });
+        })().catch((error) => { console.error(error && error.stack || error); process.exit(1); });
+        """
+    )
+    assert result["calls"] == {"preview": 1, "generate": 0, "state": 0, "media": 0}
+    assert result["sameImage"] is True
+    assert result["src"] == "data:image/jpeg;base64,KEEP"
+    assert result["during"] == [{
+        "button": True,
+        "input": True,
+        "generate": True,
+        "clear": True,
+        "editing": False,
+    }]
+    assert result["button"] is False
+    assert result["input"] is False
+    assert result["generate"] is False
+    assert result["clear"] is False
+
+
+def test_cancel_second_generate_confirm_keeps_thumbnails():
+    result = _ui_generate(
+        r"""
+        (async () => {
+          const calls = { preview: 0, generate: 0, state: 0, media: 0 };
+          const during = [];
+          let confirms = 0;
+          view = sampleView();
+          const seeded = seedThumb();
+          window.confirm = () => {
+            confirms += 1;
+            during.push({
+              button: seeded.button.disabled,
+              input: seeded.input.disabled,
+              generate: document.getElementById("generate").disabled,
+              clear: document.getElementById("clear").disabled,
+              src: seeded.image.src,
+            });
+            return confirms === 1;
+          };
+          api = {
+            preview_generate() {
+              calls.preview += 1;
+              return Promise.resolve({ replace: ["甲001.pdf"], delete: [], keep: [], writing: [] });
+            },
+            generate() {
+              calls.generate += 1;
+              return Promise.resolve({
+                needsConfirm: true,
+                replace: ["甲001.pdf"],
+                delete: [],
+                keep: [],
+                writing: ["甲002.pdf"],
+              });
+            },
+            state() { calls.state += 1; return Promise.resolve(view); },
+            media() { calls.media += 1; return Promise.resolve({ ok: true, slots: [] }); },
+          };
+          await clickGenerate();
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          const image = document.querySelector('[data-thumb="1-0"]');
+          finish({
+            calls: calls,
+            during: during,
+            sameImage: image === seeded.image,
+            src: image && image.src,
+            button: seeded.button.disabled,
+            input: seeded.input.disabled,
+            generate: document.getElementById("generate").disabled,
+            clear: document.getElementById("clear").disabled,
+          });
+        })().catch((error) => { console.error(error && error.stack || error); process.exit(1); });
+        """
+    )
+    assert result["calls"] == {"preview": 1, "generate": 1, "state": 0, "media": 0}
+    assert result["sameImage"] is True
+    assert result["src"] == "data:image/jpeg;base64,KEEP"
+    assert result["during"] == [
+        {"button": True, "input": True, "generate": True, "clear": True, "src": "data:image/jpeg;base64,KEEP"},
+        {"button": True, "input": True, "generate": True, "clear": True, "src": "data:image/jpeg;base64,KEEP"},
+    ]
+    assert result["button"] is False
+    assert result["input"] is False
+    assert result["generate"] is False
+    assert result["clear"] is False
+
+
+def test_generate_success_restores_thumbnails_and_enables_controls():
+    result = _ui_generate(
+        r"""
+        (async () => {
+          const calls = { preview: 0, generate: 0, state: 0, media: 0 };
+          const during = [];
+          const saved = sampleView();
+          view = saved;
+          seedThumb();
+          window.confirm = () => {
+            render();
+            const removal = byText("削除")[0];
+            const name = document.querySelector("#cards input");
+            during.push({
+              removal: Boolean(removal && removal.disabled),
+              input: Boolean(name && name.disabled),
+              generate: document.getElementById("generate").disabled,
+              clear: document.getElementById("clear").disabled,
+              editing: treeText(document.getElementById("cards")).indexOf("編集中") !== -1,
+            });
+            return true;
+          };
+          api = {
+            preview_generate() {
+              calls.preview += 1;
+              return Promise.resolve({ replace: ["甲001.pdf"], delete: [], keep: [], writing: ["甲001.pdf"] });
+            },
+            generate() {
+              calls.generate += 1;
+              return Promise.resolve(saved);
+            },
+            state() {
+              calls.state += 1;
+              return Promise.resolve(saved);
+            },
+            media() {
+              calls.media += 1;
+              return Promise.resolve({
+                ok: true,
+                slots: [{ index: 0, thumb: "AFTER", pageCount: 2, splittable: false }],
+              });
+            },
+          };
+          await clickGenerate();
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          const image = document.querySelector('[data-thumb="1-0"]');
+          const removal = byText("削除")[0];
+          const name = document.querySelector("#cards input");
+          const pages = document.querySelector('[data-pages="1-0"]');
+          finish({
+            calls: calls,
+            during: during,
+            src: image && image.src,
+            removal: Boolean(removal && removal.disabled),
+            input: Boolean(name && name.disabled),
+            generate: document.getElementById("generate").disabled,
+            clear: document.getElementById("clear").disabled,
+            pages: pages && pages.textContent,
+            pagesHidden: Boolean(pages && pages.hidden),
+          });
+        })().catch((error) => { console.error(error && error.stack || error); process.exit(1); });
+        """
+    )
+    assert result["calls"]["generate"] == 1
+    assert result["calls"]["preview"] == 1
+    assert result["calls"]["state"] >= 1
+    assert result["calls"]["media"] >= 1
+    assert result["during"] == [{
+        "removal": True,
+        "input": True,
+        "generate": True,
+        "clear": True,
+        "editing": False,
+    }]
+    assert result["src"] == "data:image/jpeg;base64,AFTER"
+    assert result["removal"] is False
+    assert result["input"] is False
+    assert result["generate"] is False
+    assert result["clear"] is False
+    assert result["pages"] == "2ページ"
+    assert result["pagesHidden"] is False
+
+
 def test_stale_unshown_layout_is_not_deleted_or_cleared(monkeypatch, tmp_path):
     first = tmp_path / "a.pdf"
     second = tmp_path / "b.pdf"

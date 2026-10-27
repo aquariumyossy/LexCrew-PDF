@@ -585,10 +585,18 @@ document.getElementById("clear").addEventListener("click", async () => {
   }
 });
 
+function setGenerating(on) {
+  generating = on;
+  document.getElementById("generate").disabled = on;
+  document.getElementById("clear").disabled = on;
+  document.querySelectorAll("#cards button, #cards input").forEach((control) => {
+    control.disabled = on;
+  });
+}
+
 document.getElementById("generate").addEventListener("click", async () => {
   if (!api || generating) return;
-  generating = true;
-  if (view) render();
+  setGenerating(true);
   try {
     const preview = await api.preview_generate();
     if (!confirmGenerate(preview)) return;
@@ -600,8 +608,7 @@ document.getElementById("generate").addEventListener("click", async () => {
     if (result && result.message) showBanner(result.message);
     applyView(result);
   } finally {
-    generating = false;
-    if (view) render();
+    setGenerating(false);
   }
 });
 

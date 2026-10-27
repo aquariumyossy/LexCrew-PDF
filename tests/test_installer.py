@@ -41,9 +41,9 @@ def _function(code: str, name: str) -> str:
     return rest[: rest.index("\nFunctionEnd")]
 
 
-def test_version_is_1_4_1():
+def test_version_is_1_5_0():
     project = _read(ROOT / "pyproject.toml")
-    assert 'version = "1.4.1"' in project
+    assert 'version = "1.5.0"' in project
     assert '"pymupdf==1.28.2"' in project
     assert '"pywebview==6.2.1"' in project
 
@@ -206,7 +206,7 @@ def _run_build(
     packaging.mkdir(parents=True)
     script = packaging / "build.ps1"
     shutil.copy(ROOT / "packaging" / "build.ps1", script)
-    (sandbox / "pyproject.toml").write_text('version = "1.4.1"\n', encoding="utf-8")
+    (sandbox / "pyproject.toml").write_text('version = "1.5.0"\n', encoding="utf-8")
     fake = sandbox / ".venv" / "Scripts" / "python.exe"
     fake.parent.mkdir(parents=True)
     fake.write_text(_FAKE_PYTHON, encoding="utf-8")
@@ -468,7 +468,7 @@ def test_user_docs_split_zip_and_setup():
     zip_guide = _read(ROOT / "packaging" / "使い方.txt")
     setup_guide = _read(ROOT / "installer" / "使い方.txt")
     for text in (readme, setup_guide):
-        assert "LexCrew-PDF-Setup-1.4.1.exe" in text
+        assert "LexCrew-PDF-Setup-1.5.0.exe" in text
         assert "Programs\\LexCrew-PDF" in text
         assert "LexCrew PDF" in text
         assert "デスクトップにショートカットを作る" in text
@@ -489,7 +489,7 @@ def test_user_docs_split_zip_and_setup():
     assert "PC が保護されました" not in zip_guide
     assert "デスクトップにショートカットを作る" not in zip_guide
     assert "開発用" in readme
-    assert "LexCrew-PDF-1.4.1-win64.zip" in readme
+    assert "LexCrew-PDF-1.5.0-win64.zip" in readme
     for text in (zip_guide, setup_guide):
         assert "甲第N号証" in text
         assert "スタンプ" in text
@@ -529,13 +529,13 @@ def test_setup_compiles_with_makensis():
         (payload / "LICENSE").write_text("license\n", encoding="utf-8")
         (payload / "LexCrew-PDF.bat").write_text("bat\n", encoding="utf-8")
         (payload / "LexCrew-PDF.ico").write_bytes(_tiny_ico())
-        outfile = Path(tmp) / "LexCrew-PDF-Setup-1.4.1.exe"
+        outfile = Path(tmp) / "LexCrew-PDF-Setup-1.5.0.exe"
         cmd = [
             "makensis",
             "-WX",
             "-INPUTCHARSET",
             "UTF8",
-            "-DVERSION=1.4.1",
+            "-DVERSION=1.5.0",
             f"-DOUTFILE={outfile}",
             f"-DPAYLOAD={payload}",
             f"-DICON={payload / 'LexCrew-PDF.ico'}",
@@ -612,14 +612,14 @@ def test_wine_install_keeps_unrelated_files_and_user_notes():
         (payload / "LICENSE").write_text("license\n", encoding="utf-8")
         (payload / "LexCrew-PDF.bat").write_text("do-not-ship\n", encoding="utf-8")
         (payload / "LexCrew-PDF.ico").write_bytes(_tiny_ico())
-        setup = prefix / "LexCrew-PDF-Setup-1.4.1.exe"
+        setup = prefix / "LexCrew-PDF-Setup-1.5.0.exe"
         compiled = _run(
             [
                 "makensis",
                 "-WX",
                 "-INPUTCHARSET",
                 "UTF8",
-                "-DVERSION=1.4.1",
+                "-DVERSION=1.5.0",
                 f"-DOUTFILE={setup}",
                 f"-DPAYLOAD={payload}",
                 f"-DICON={payload / 'LexCrew-PDF.ico'}",

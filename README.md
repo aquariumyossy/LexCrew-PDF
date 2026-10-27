@@ -95,7 +95,7 @@
 
 ## インストール（利用者向け）
 
-1. 配布物の `LexCrew-PDF-Setup-1.4.1.exe` を実行します。管理者権限は不要です。今サインインしているユーザーにだけ入ります
+1. 配布物の `LexCrew-PDF-Setup-1.5.0.exe` を実行します。管理者権限は不要です。今サインインしているユーザーにだけ入ります
 2. 署名の無いセットアップを初めて実行すると、Windows が「PC が保護されました」と表示することがあります。そのときは「詳細情報」を押し、「実行」を押します
 3. インストール先は `%LOCALAPPDATA%\Programs\LexCrew-PDF` です。zip を展開して置く手順はありません
 4. スタートメニューに「LexCrew PDF」が入ります
@@ -132,7 +132,7 @@ py -3 -m venv .venv
 powershell -ExecutionPolicy Bypass -File packaging\build.ps1
 ```
 
-`-e` を付けると、`python -m lexcrew_pdf` が `src` のコードを直接読みます。`packaging\build.ps1` は `dist\LexCrew-PDF-Setup-1.4.1.exe` と、開発用の `dist\LexCrew-PDF-1.4.1-win64.zip` を作ります。セットアップを作るには NSIS 3 の `makensis` が必要です。初回は埋め込みの Python を取得するため、インターネットが必要です。利用者に渡すのはセットアップだけです。zip は、展開したフォルダの `LexCrew-PDF.bat` で起動を見る開発用です。そのショートカットは、展開したフォルダを指します。zip の `停止.bat` は、その展開フォルダの `runtime` だけを止めます。
+`-e` を付けると、`python -m lexcrew_pdf` が `src` のコードを直接読みます。`packaging\build.ps1` は `dist\LexCrew-PDF-Setup-1.5.0.exe` と、開発用の `dist\LexCrew-PDF-1.5.0-win64.zip` を作ります。セットアップを作るには NSIS 3 の `makensis` が必要です。初回は埋め込みの Python を取得するため、インターネットが必要です。利用者に渡すのはセットアップだけです。zip は、展開したフォルダの `LexCrew-PDF.bat` で起動を見る開発用です。そのショートカットは、展開したフォルダを指します。zip の `停止.bat` は、その展開フォルダの `runtime` だけを止めます。
 
 ### 主なディレクトリ
 
